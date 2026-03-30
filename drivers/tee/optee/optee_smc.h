@@ -279,6 +279,9 @@ struct optee_smc_get_shm_config_result {
 /* Secure world supports pre-allocating RPC arg struct */
 #define OPTEE_SMC_SEC_CAP_RPC_ARG		BIT(6)
 
+/* Non-standard capabilities not yet in mainline OP-TEE driver */
+#define OPTEE_SMC_SEC_CAP_PM_NOIRQ		BIT(15)
+
 #define OPTEE_SMC_FUNCID_EXCHANGE_CAPABILITIES	9
 #define OPTEE_SMC_EXCHANGE_CAPABILITIES \
 	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_EXCHANGE_CAPABILITIES)
@@ -444,11 +447,51 @@ struct optee_smc_disable_shm_cache_result {
 #define OPTEE_SMC_GET_ASYNC_NOTIF_VALUE \
 	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_GET_ASYNC_NOTIF_VALUE)
 
+#define OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_IT	1
+
+#define OPTEE_SMC_IT_NOTIF_VALUE_VALID		BIT(0)
+#define OPTEE_SMC_IT_NOTIF_VALUE_PENDING	BIT(1)
+
 /* See OPTEE_SMC_CALL_WITH_RPC_ARG above */
 #define OPTEE_SMC_FUNCID_CALL_WITH_RPC_ARG	18
 
 /* See OPTEE_SMC_CALL_WITH_REGD_ARG above */
 #define OPTEE_SMC_FUNCID_CALL_WITH_REGD_ARG	19
+
+/*
+ * Notification that OP-TEE generates and interruption.
+ */
+#define OPTEE_SMC_FUNCID_GET_IT_NOTIF_VALUE	53		// Update will likely change to 20
+#define OPTEE_SMC_GET_IT_NOTIF_VALUE \
+	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_GET_IT_NOTIF_VALUE)
+
+#define OPTEE_SMC_FUNCID_SET_IT_NOTIF_MASK	54		// Update will likely change to 21
+#define OPTEE_SMC_SET_IT_NOTIF_MASK \
+	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_SET_IT_NOTIF_MASK)
+
+/*
+ * OPTEE_SMC_CALL_WITH_ARG_NSEC_NOIRQ
+ * Equivaent to OPTEE_SMC_CALL_WITH_ARG but with foreign interrupts masked.
+ */
+#define OPTEE_SMC_FUNCID_CALL_WITH_ARG_NSEC_NOIRQ	56
+#define OPTEE_SMC_CALL_WITH_ARG_NSEC_NOIRQ \
+	OPTEE_SMC_STD_CALL_VAL(OPTEE_SMC_FUNCID_CALL_WITH_ARG_NSEC_NOIRQ)
+
+/*
+ * OPTEE_SMC_CALL_WITH_RPC_ARG_NSEC_NOIRQ
+ * Equivaent to OPTEE_SMC_CALL_WITH_RPC_ARG but with foreign interrupts masked.
+ */
+#define OPTEE_SMC_FUNCID_CALL_WITH_RPC_ARG_NSEC_NOIRQ	57
+#define OPTEE_SMC_CALL_WITH_RPC_ARG_NSEC_NOIRQ \
+	OPTEE_SMC_STD_CALL_VAL(OPTEE_SMC_FUNCID_CALL_WITH_RPC_ARG_NSEC_NOIRQ)
+
+/*
+ * OPTEE_SMC_CALL_WITH_REGD_ARG_NSEC_NOIRQ
+ * Equivaent to OPTEE_SMC_CALL_WITH_REGD_ARG but with foreign interrupts masked.
+ */
+#define OPTEE_SMC_FUNCID_CALL_WITH_REGD_ARG_NSEC_NOIRQ	58
+#define OPTEE_SMC_CALL_WITH_REGD_ARG_NSEC_NOIRQ \
+	OPTEE_SMC_STD_CALL_VAL(OPTEE_SMC_FUNCID_CALL_WITH_REGD_ARG_NSEC_NOIRQ)
 
 /*
  * Resume from RPC (for example after processing a foreign interrupt)
@@ -578,6 +621,29 @@ struct optee_smc_disable_shm_cache_result {
 #define OPTEE_SMC_RPC_FUNC_CMD		5
 #define OPTEE_SMC_RETURN_RPC_CMD \
 	OPTEE_SMC_RPC_VAL(OPTEE_SMC_RPC_FUNC_CMD)
+
+/*
+ * Do an OCall RPC request to caller client. The Ocall request ABI is very
+ * minimal: 2 input arguments and 2 output arguments. 1st output argument
+ * value 0 is reserved to error management requesting OCall termination.
+ * When 1st output argument is 0, 2nd output argument is either 0 or can
+ * carry a TEEC_Result like error code.
+ *
+ * "Call" register usage:
+ * a0	OPTEE_SMC_RETURN_RPC_OCALL2
+ * a1	OCall input argument 1 (32 bit)
+ * a2	OCall input argument 2 (32 bit)
+ * a3-7	Resume information, must be preserved
+ *
+ * "Return" register usage:
+ * a0	SMC Function ID, OPTEE_SMC_CALL_RETURN_FROM_RPC.
+ * a1	OCall output argument 1 (32 bit), value 0 upon error
+ * a2	OCall output argument 2 (32 bit), TEEC_Result error if @a1 is 0
+ * a3-7	Preserved
+ */
+#define OPTEE_SMC_RPC_FUNC_OCALL2		2048
+#define OPTEE_SMC_RETURN_RPC_OCALL2 \
+	OPTEE_SMC_RPC_VAL(OPTEE_SMC_RPC_FUNC_OCALL2)
 
 /* Returned in a0 */
 #define OPTEE_SMC_RETURN_UNKNOWN_FUNCTION 0xFFFFFFFF

@@ -336,7 +336,7 @@ static int __mbox_bind_client(struct mbox_chan *chan, struct mbox_client *cl)
 	chan->cl = cl;
 	init_completion(&chan->tx_complete);
 
-	if (chan->txdone_method	== TXDONE_BY_POLL && cl->knows_txdone)
+	if (cl->knows_txdone)
 		chan->txdone_method = TXDONE_BY_ACK;
 
 	spin_unlock_irqrestore(&chan->lock, flags);
@@ -478,6 +478,16 @@ struct mbox_chan *mbox_request_channel_byname(struct mbox_client *cl,
 }
 EXPORT_SYMBOL_GPL(mbox_request_channel_byname);
 
+static void  mbox_txdone_init(struct mbox_controller *mbox, int *tx_method)
+{
+	if (mbox->txdone_irq)
+		*tx_method = TXDONE_BY_IRQ;
+	else if (mbox->txdone_poll)
+		*tx_method = TXDONE_BY_POLL;
+	else /* It has to be ACK then */
+		*tx_method = TXDONE_BY_ACK;
+}
+
 /**
  * mbox_free_channel - The client relinquishes control of a mailbox
  *			channel by this call.
@@ -497,8 +507,8 @@ void mbox_free_channel(struct mbox_chan *chan)
 	spin_lock_irqsave(&chan->lock, flags);
 	chan->cl = NULL;
 	chan->active_req = NULL;
-	if (chan->txdone_method == TXDONE_BY_ACK)
-		chan->txdone_method = TXDONE_BY_POLL;
+
+	mbox_txdone_init(chan->mbox, &chan->txdone_method);
 
 	spin_unlock_irqrestore(&chan->lock, flags);
 	module_put(chan->mbox->dev->driver->owner);
@@ -531,12 +541,7 @@ int mbox_controller_register(struct mbox_controller *mbox)
 	if (!mbox || !mbox->dev || !mbox->ops || !mbox->num_chans)
 		return -EINVAL;
 
-	if (mbox->txdone_irq)
-		txdone = TXDONE_BY_IRQ;
-	else if (mbox->txdone_poll)
-		txdone = TXDONE_BY_POLL;
-	else /* It has to be ACK then */
-		txdone = TXDONE_BY_ACK;
+	mbox_txdone_init(mbox, &txdone);
 
 	if (txdone == TXDONE_BY_POLL) {
 

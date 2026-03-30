@@ -86,6 +86,7 @@
 #define OV5640_REG_TIMING_VOFFS		0x3812
 #define OV5640_REG_TIMING_TC_REG20	0x3820
 #define OV5640_REG_TIMING_TC_REG21	0x3821
+#define OV5640_REG_DVP_PCLK_DIVIDER	0x3824
 #define OV5640_REG_AEC_CTRL00		0x3a00
 #define OV5640_REG_AEC_B50_STEP		0x3a08
 #define OV5640_REG_AEC_B60_STEP		0x3a0a
@@ -102,9 +103,6 @@
 #define OV5640_REG_SIGMADELTA_CTRL0C	0x3c0c
 #define OV5640_REG_FRAME_CTRL01		0x4202
 #define OV5640_REG_FORMAT_CONTROL00	0x4300
-#define OV5640_REG_VFIFO_HSIZE		0x4602
-#define OV5640_REG_VFIFO_VSIZE		0x4604
-#define OV5640_REG_JPG_MODE_SELECT	0x4713
 #define OV5640_REG_CCIR656_CTRL00	0x4730
 #define OV5640_REG_POLARITY_CTRL00	0x4740
 #define OV5640_REG_MIPI_CTRL00		0x4800
@@ -568,7 +566,7 @@ static const struct reg_value ov5640_init_setting[] = {
 	{0x4001, 0x02, 0, 0}, {0x4004, 0x02, 0, 0}, {0x3000, 0x00, 0, 0},
 	{0x3002, 0x1c, 0, 0}, {0x3004, 0xff, 0, 0}, {0x3006, 0xc3, 0, 0},
 	{0x302e, 0x08, 0, 0}, {0x4300, 0x3f, 0, 0},
-	{0x501f, 0x00, 0, 0}, {0x440e, 0x00, 0, 0}, {0x4837, 0x0a, 0, 0},
+	{0x501f, 0x00, 0, 0}, {0x440e, 0x00, 0, 0}, {0x4713, 0x02, 0, 0}, {0x4837, 0x0a, 0, 0},
 	{0x5000, 0xa7, 0, 0}, {0x5001, 0xa3, 0, 0}, {0x5180, 0xff, 0, 0},
 	{0x5181, 0xf2, 0, 0}, {0x5182, 0x00, 0, 0}, {0x5183, 0x14, 0, 0},
 	{0x5184, 0x25, 0, 0}, {0x5185, 0x24, 0, 0}, {0x5186, 0x09, 0, 0},
@@ -633,7 +631,8 @@ static const struct reg_value ov5640_setting_low_res[] = {
 	{0x3a0d, 0x04, 0, 0}, {0x3a14, 0x03, 0, 0}, {0x3a15, 0xd8, 0, 0},
 	{0x4001, 0x02, 0, 0}, {0x4004, 0x02, 0, 0},
 	{0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0}, {0x460c, 0x22, 0, 0},
-	{0x3824, 0x02, 0, 0}, {0x5001, 0xa3, 0, 0},
+	{0x4713, 0x02, 0, 0},
+	{0x5001, 0xa3, 0, 0},
 };
 
 static const struct reg_value ov5640_setting_720P_1280_720[] = {
@@ -646,9 +645,9 @@ static const struct reg_value ov5640_setting_720P_1280_720[] = {
 	{0x3a03, 0xe4, 0, 0}, {0x3a08, 0x01, 0, 0}, {0x3a09, 0xbc, 0, 0},
 	{0x3a0a, 0x01, 0, 0}, {0x3a0b, 0x72, 0, 0}, {0x3a0e, 0x01, 0, 0},
 	{0x3a0d, 0x02, 0, 0}, {0x3a14, 0x02, 0, 0}, {0x3a15, 0xe4, 0, 0},
-	{0x4001, 0x02, 0, 0}, {0x4004, 0x02, 0, 0},
+	{0x4001, 0x02, 0, 0}, {0x4004, 0x02, 0, 0}, {0x4713, 0x02, 0, 0},
 	{0x4407, 0x04, 0, 0}, {0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0},
-	{0x3824, 0x04, 0, 0}, {0x5001, 0x83, 0, 0},
+	{0x5001, 0x83, 0, 0},
 };
 
 static const struct reg_value ov5640_setting_1080P_1920_1080[] = {
@@ -663,7 +662,7 @@ static const struct reg_value ov5640_setting_1080P_1920_1080[] = {
 	{0x3a0d, 0x04, 0, 0}, {0x3a14, 0x03, 0, 0}, {0x3a15, 0xd8, 0, 0},
 	{0x4001, 0x02, 0, 0}, {0x4004, 0x06, 0, 0},
 	{0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0}, {0x460c, 0x22, 0, 0},
-	{0x3824, 0x02, 0, 0}, {0x5001, 0x83, 0, 0},
+	{0x5001, 0x83, 0, 0},
 	{0x3c07, 0x07, 0, 0}, {0x3c08, 0x00, 0, 0},
 	{0x3c09, 0x1c, 0, 0}, {0x3c0a, 0x9c, 0, 0}, {0x3c0b, 0x40, 0, 0},
 	{0x3612, 0x2b, 0, 0}, {0x3708, 0x64, 0, 0},
@@ -671,7 +670,8 @@ static const struct reg_value ov5640_setting_1080P_1920_1080[] = {
 	{0x3a09, 0x50, 0, 0}, {0x3a0a, 0x01, 0, 0}, {0x3a0b, 0x18, 0, 0},
 	{0x3a0e, 0x03, 0, 0}, {0x3a0d, 0x04, 0, 0}, {0x3a14, 0x04, 0, 0},
 	{0x3a15, 0x60, 0, 0}, {0x4407, 0x04, 0, 0},
-	{0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0}, {0x3824, 0x04, 0, 0},
+	{0x460b, 0x37, 0, 0}, {0x460c, 0x20, 0, 0},
+	{0x4713, 0x02, 0, 0},
 	{0x4005, 0x1a, 0, 0},
 };
 
@@ -685,9 +685,9 @@ static const struct reg_value ov5640_setting_QSXGA_2592_1944[] = {
 	{0x3a03, 0xd8, 0, 0}, {0x3a08, 0x01, 0, 0}, {0x3a09, 0x27, 0, 0},
 	{0x3a0a, 0x00, 0, 0}, {0x3a0b, 0xf6, 0, 0}, {0x3a0e, 0x03, 0, 0},
 	{0x3a0d, 0x04, 0, 0}, {0x3a14, 0x03, 0, 0}, {0x3a15, 0xd8, 0, 0},
-	{0x4001, 0x02, 0, 0}, {0x4004, 0x06, 0, 0},
+	{0x4001, 0x02, 0, 0}, {0x4004, 0x06, 0, 0}, {0x4713, 0x02, 0, 0},
 	{0x4407, 0x04, 0, 0}, {0x460b, 0x35, 0, 0}, {0x460c, 0x22, 0, 0},
-	{0x3824, 0x02, 0, 0}, {0x5001, 0x83, 0, 70},
+	{0x5001, 0x83, 0, 70},
 };
 
 static const struct ov5640_mode_info ov5640_mode_data[OV5640_NUM_MODES] = {
@@ -1578,13 +1578,43 @@ static unsigned long ov5640_calc_pclk(struct ov5640_dev *sensor,
 
 static int ov5640_set_dvp_pclk(struct ov5640_dev *sensor)
 {
+	const struct ov5640_mode_info *mode = sensor->current_mode;
+	struct i2c_client *client = sensor->i2c_client;
 	u8 prediv, mult, sysdiv, pll_rdiv, bit_div, pclk_div;
+	u32 pclk_freq, max_pclk_freq;
+	u8 dvp_pclk_divider;
 	u32 rate;
 	int ret;
 
 	rate = ov5640_calc_pixel_rate(sensor);
 	rate *= ov5640_code_to_bpp(sensor, sensor->fmt.code);
 	rate /= sensor->ep.bus.parallel.bus_width;
+
+	/*
+	 * 1280x720 and 1024x768 are reported to use 'SUBSAMPLING' only,
+	 * but they seems to go through the scaler before subsampling.
+	 */
+	if (mode->dn_mode == SCALING ||
+	   (mode->id == OV5640_MODE_720P_1280_720) ||
+	   (mode->id == OV5640_MODE_XGA_1024_768))
+		dvp_pclk_divider = 1;
+	else
+		dvp_pclk_divider = 2;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_DVP_PCLK_DIVIDER,
+			       dvp_pclk_divider);
+	if (ret)
+		return ret;
+
+	pclk_freq = rate / dvp_pclk_divider;
+	max_pclk_freq = sensor->ep.bus.parallel.pclk_max_frequency;
+
+	/* clip rate according to optional maximum pixel clock limit */
+	if (max_pclk_freq && (pclk_freq > max_pclk_freq)) {
+		rate = max_pclk_freq * dvp_pclk_divider;
+		dev_dbg(&client->dev, "DVP pixel clock too high (%d > %d Hz), reducing rate...\n",
+			pclk_freq, max_pclk_freq);
+	}
 
 	ov5640_calc_pclk(sensor, rate, &prediv, &mult, &sysdiv, &pll_rdiv,
 			 &bit_div, &pclk_div);
@@ -1620,30 +1650,6 @@ static int ov5640_set_dvp_pclk(struct ov5640_dev *sensor)
 			      (ilog2(pclk_div) << 4));
 }
 
-/* set JPEG framing sizes */
-static int ov5640_set_jpeg_timings(struct ov5640_dev *sensor,
-				   const struct ov5640_mode_info *mode)
-{
-	int ret;
-
-	/*
-	 * compression mode 3 timing
-	 *
-	 * Data is transmitted with programmable width (VFIFO_HSIZE).
-	 * No padding done. Last line may have less data. Varying
-	 * number of lines per frame, depending on amount of data.
-	 */
-	ret = ov5640_mod_reg(sensor, OV5640_REG_JPG_MODE_SELECT, 0x7, 0x3);
-	if (ret < 0)
-		return ret;
-
-	ret = ov5640_write_reg16(sensor, OV5640_REG_VFIFO_HSIZE, mode->width);
-	if (ret < 0)
-		return ret;
-
-	return ov5640_write_reg16(sensor, OV5640_REG_VFIFO_VSIZE, mode->height);
-}
-
 /* download ov5640 settings to sensor through i2c */
 static int ov5640_set_timings(struct ov5640_dev *sensor,
 			      const struct ov5640_mode_info *mode)
@@ -1652,12 +1658,6 @@ static int ov5640_set_timings(struct ov5640_dev *sensor,
 	const struct v4l2_rect *analog_crop;
 	const struct v4l2_rect *crop;
 	int ret;
-
-	if (sensor->fmt.code == MEDIA_BUS_FMT_JPEG_1X8) {
-		ret = ov5640_set_jpeg_timings(sensor, mode);
-		if (ret < 0)
-			return ret;
-	}
 
 	timings = ov5640_timings(sensor, mode);
 	analog_crop = &timings->analog_crop;

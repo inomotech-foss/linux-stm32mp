@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/of.h>
 
 #include <drm/drm_aperture.h>
 #include <drm/drm_atomic.h>
@@ -36,6 +37,10 @@ static const struct drm_mode_config_funcs drv_mode_config_funcs = {
 	.fb_create = drm_gem_fb_create,
 	.atomic_check = drm_atomic_helper_check,
 	.atomic_commit = drm_atomic_helper_commit,
+};
+
+static const struct drm_mode_config_helper_funcs drv_mode_config_helpers = {
+	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
 };
 
 static int stm_gem_dma_dumb_create(struct drm_file *file,
@@ -71,16 +76,9 @@ static const struct drm_driver drv_driver = {
 static int drv_load(struct drm_device *ddev)
 {
 	struct platform_device *pdev = to_platform_device(ddev->dev);
-	struct ltdc_device *ldev;
 	int ret;
 
 	DRM_DEBUG("%s\n", __func__);
-
-	ldev = drmm_kzalloc(ddev, sizeof(*ldev), GFP_KERNEL);
-	if (!ldev)
-		return -ENOMEM;
-
-	ddev->dev_private = (void *)ldev;
 
 	ret = drmm_mode_config_init(ddev);
 	if (ret)
@@ -96,42 +94,42 @@ static int drv_load(struct drm_device *ddev)
 	ddev->mode_config.max_width = STM_MAX_FB_WIDTH;
 	ddev->mode_config.max_height = STM_MAX_FB_HEIGHT;
 	ddev->mode_config.funcs = &drv_mode_config_funcs;
+	ddev->mode_config.helper_private = &drv_mode_config_helpers;
 	ddev->mode_config.normalize_zpos = true;
+
+	platform_set_drvdata(pdev, ddev);
 
 	ret = ltdc_load(ddev);
 	if (ret)
 		return ret;
-
 	drm_mode_config_reset(ddev);
 	drm_kms_helper_poll_init(ddev);
-
-	platform_set_drvdata(pdev, ddev);
 
 	return 0;
 }
 
 static void drv_unload(struct drm_device *ddev)
 {
+	struct platform_device *pdev = to_platform_device(ddev->dev);
+
 	DRM_DEBUG("%s\n", __func__);
 
 	drm_kms_helper_poll_fini(ddev);
-	drm_atomic_helper_shutdown(ddev);
 	ltdc_unload(ddev);
+	platform_set_drvdata(pdev, NULL);
 }
 
 static __maybe_unused int drv_suspend(struct device *dev)
 {
 	struct drm_device *ddev = dev_get_drvdata(dev);
-	struct ltdc_device *ldev = ddev->dev_private;
-	struct drm_atomic_state *state;
+	int ret;
 
-	WARN_ON(ldev->suspend_state);
+	DRM_DEBUG_DRIVER("\n");
 
-	state = drm_atomic_helper_suspend(ddev);
-	if (IS_ERR(state))
-		return PTR_ERR(state);
+	ret = drm_mode_config_helper_suspend(ddev);
+	if (ret)
+		return ret;
 
-	ldev->suspend_state = state;
 	pm_runtime_force_suspend(dev);
 
 	return 0;
@@ -140,28 +138,21 @@ static __maybe_unused int drv_suspend(struct device *dev)
 static __maybe_unused int drv_resume(struct device *dev)
 {
 	struct drm_device *ddev = dev_get_drvdata(dev);
-	struct ltdc_device *ldev = ddev->dev_private;
-	int ret;
 
-	if (WARN_ON(!ldev->suspend_state))
-		return -ENOENT;
+	DRM_DEBUG_DRIVER("\n");
 
 	pm_runtime_force_resume(dev);
-	ret = drm_atomic_helper_resume(ddev, ldev->suspend_state);
-	if (ret)
-		pm_runtime_force_suspend(dev);
 
-	ldev->suspend_state = NULL;
-
-	return ret;
+	return drm_mode_config_helper_resume(ddev);
 }
 
 static __maybe_unused int drv_runtime_suspend(struct device *dev)
 {
 	struct drm_device *ddev = dev_get_drvdata(dev);
+	struct ltdc_device *ldev = ddev->dev_private;
 
 	DRM_DEBUG_DRIVER("\n");
-	ltdc_suspend(ddev);
+	ltdc_suspend(ldev);
 
 	return 0;
 }
@@ -169,9 +160,10 @@ static __maybe_unused int drv_runtime_suspend(struct device *dev)
 static __maybe_unused int drv_runtime_resume(struct device *dev)
 {
 	struct drm_device *ddev = dev_get_drvdata(dev);
+	struct ltdc_device *ldev = ddev->dev_private;
 
 	DRM_DEBUG_DRIVER("\n");
-	return ltdc_resume(ddev);
+	return ltdc_resume(ldev);
 }
 
 static const struct dev_pm_ops drv_pm_ops = {
@@ -184,19 +176,73 @@ static int stm_drm_platform_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct drm_device *ddev;
-	int ret;
+	struct ltdc_device *ldev;
+	struct device *sfdev;
+	struct device_node *node;
+	int ret = 0;
 
-	DRM_DEBUG("%s\n", __func__);
+	DRM_DEBUG_DRIVER("\n");
 
-	ret = drm_aperture_remove_framebuffers(&drv_driver);
+	/*
+	 * To avoid conflicts between the simple-framebuffer and the display-controller,
+	 * a check was added concerning the state of the simple-framebuffer (must be probed).
+	 */
+	node = of_find_compatible_node(NULL, NULL, "simple-framebuffer");
+	if (!IS_ERR(node)) {
+		if (of_device_is_available(node)) {
+			sfdev = bus_find_device_by_of_node(&platform_bus_type, node);
+			if (sfdev) {
+				if (!device_is_bound(sfdev))
+					ret = -EPROBE_DEFER;
+				put_device(sfdev);
+			}
+		}
+		of_node_put(node);
+		if (ret)
+			return ret;
+	}
+
+	ldev = devm_kzalloc(dev, sizeof(*ldev), GFP_KERNEL);
+	if (!ldev)
+		return -ENOMEM;
+
+	ret = ltdc_parse_device_tree(dev);
 	if (ret)
 		return ret;
 
-	dma_set_coherent_mask(dev, DMA_BIT_MASK(32));
+	ret = ltdc_get_clk(dev, ldev);
+	if (ret)
+		return ret;
+
+	/* Resume device to enable the clocks */
+	ret = ltdc_resume(ldev);
+	if (ret)
+		return ret;
+
+	ret = drm_aperture_remove_framebuffers(&drv_driver);
+	if (ret)
+		goto err_suspend;
+
+	/* Configure the DMA segment size to make sure we get contiguous & coherent memory */
+	ret = dma_set_coherent_mask(dev, DMA_BIT_MASK(32));
+	if (ret) {
+		dev_err(dev, "Failed to set DMA segment mask\n");
+		goto err_suspend;
+	}
+
+	ret = dma_set_max_seg_size(dev, DMA_BIT_MASK(32));
+	if (ret) {
+		dev_err(dev, "Failed to set DMA segment size\n");
+		goto err_suspend;
+	}
 
 	ddev = drm_dev_alloc(&drv_driver, dev);
-	if (IS_ERR(ddev))
-		return PTR_ERR(ddev);
+	if (IS_ERR(ddev)) {
+		ret =  PTR_ERR(ddev);
+		goto err_suspend;
+	}
+
+	ddev->dev_private = (void *)ldev;
 
 	ret = drv_load(ddev);
 	if (ret)
@@ -214,6 +260,8 @@ err_unload:
 	drv_unload(ddev);
 err_put:
 	drm_dev_put(ddev);
+err_suspend:
+	ltdc_suspend(ldev);
 
 	return ret;
 }
@@ -229,13 +277,22 @@ static void stm_drm_platform_remove(struct platform_device *pdev)
 	drm_dev_put(ddev);
 }
 
-static void stm_drm_platform_shutdown(struct platform_device *pdev)
-{
-	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
-}
+static struct ltdc_plat_data stm_drm_plat_data = {
+	.pad_max_freq_hz = 90000000,
+};
+
+static struct ltdc_plat_data stm_drm_plat_data_mp21 = {
+	.pad_max_freq_hz = 150000000,
+};
+
+static struct ltdc_plat_data stm_drm_plat_data_mp25 = {
+	.pad_max_freq_hz = 150000000,
+};
 
 static const struct of_device_id drv_dt_ids[] = {
-	{ .compatible = "st,stm32-ltdc"},
+	{ .compatible = "st,stm32-ltdc", .data = &stm_drm_plat_data, },
+	{ .compatible = "st,stm32mp21-ltdc", .data = &stm_drm_plat_data_mp21, },
+	{ .compatible = "st,stm32mp25-ltdc", .data = &stm_drm_plat_data_mp25, },
 	{ /* end node */ },
 };
 MODULE_DEVICE_TABLE(of, drv_dt_ids);
@@ -243,7 +300,6 @@ MODULE_DEVICE_TABLE(of, drv_dt_ids);
 static struct platform_driver stm_drm_platform_driver = {
 	.probe = stm_drm_platform_probe,
 	.remove_new = stm_drm_platform_remove,
-	.shutdown = stm_drm_platform_shutdown,
 	.driver = {
 		.name = "stm32-display",
 		.of_match_table = drv_dt_ids,

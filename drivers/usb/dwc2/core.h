@@ -10,10 +10,12 @@
 
 #include <linux/acpi.h>
 #include <linux/phy/phy.h>
+#include <linux/power_supply.h>
 #include <linux/regulator/consumer.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/otg.h>
 #include <linux/usb/phy.h>
+#include <linux/usb/role.h>
 #include "hw.h"
 
 /*
@@ -396,6 +398,9 @@ enum dwc2_ep0_state {
  *			detection using GGPIO register.
  *			0 - Deactivate the external level detection (default)
  *			1 - Activate the external level detection
+ * @activate_stm32_bvaloval_en: External VBUS valid indicator
+ *			0: VBUS is not valid
+ *			1: VBUS is valid
  * @activate_ingenic_overcurrent_detection: Activate Ingenic overcurrent
  *			detection.
  *			0 - Deactivate the overcurrent detection
@@ -468,11 +473,16 @@ struct dwc2_core_params {
 	u8 hird_threshold;
 	bool activate_stm_fs_transceiver;
 	bool activate_stm_id_vb_detection;
+	bool activate_stm32_bvaloval_en;
 	bool activate_ingenic_overcurrent_detection;
+	bool activate_stm32_otgarcr_en;
+	bool stm32_has_batt_chg_det;
 	bool ipg_isoc_en;
 	u16 max_packet_count;
 	u32 max_transfer_size;
 	u32 ahbcfg;
+	unsigned int stm32_syscfg_otgarcr_reg_off;
+	struct regmap *stm32_regmap;
 
 	/* GREFCLK parameters */
 	u32 ref_clk_per;
@@ -499,6 +509,7 @@ struct dwc2_core_params {
 	u32 g_tx_fifo_size[MAX_EPS_CHANNELS];
 
 	bool change_speed_quirk;
+	bool reset_phy_on_start;
 };
 
 /**
@@ -843,6 +854,8 @@ struct dwc2_hregs_backup {
  * These are common for both host and peripheral modes:
  *
  * @dev:                The struct device pointer
+ * @ddev:		Device struct used to manage debugfs access with power
+ *			saving modes (runtime PM).
  * @regs:		Pointer to controller regs
  * @hw_params:          Parameters that were autodetected from the
  *                      hardware registers
@@ -856,6 +869,7 @@ struct dwc2_hregs_backup {
  *                      - USB_DR_MODE_HOST
  *                      - USB_DR_MODE_OTG
  * @role_sw:		usb_role_switch handle
+ * @current_role:	current usb_role, when using role_sw
  * @role_sw_default_mode: default operation mode of controller while usb role
  *			is USB_ROLE_NONE
  * @hcd_enabled:	Host mode sub-driver initialization indicator.
@@ -864,6 +878,7 @@ struct dwc2_hregs_backup {
  * @hibernated:		True if core is hibernated
  * @in_ppd:		True if core is partial power down mode.
  * @bus_suspended:	True if bus is suspended
+ * @suspended_from:	The device state before the host has suspended the bus.
  * @reset_phy_on_wake:	Quirk saying that we should assert PHY reset on a
  *			remote wakeup.
  * @phy_off_for_suspend: Status of whether we turned the PHY off at suspend.
@@ -1047,6 +1062,7 @@ struct dwc2_hregs_backup {
  */
 struct dwc2_hsotg {
 	struct device *dev;
+	struct device *ddev;
 	void __iomem *regs;
 	/** Params detected from hardware */
 	struct dwc2_hw_params hw_params;
@@ -1055,6 +1071,7 @@ struct dwc2_hsotg {
 	enum usb_otg_state op_state;
 	enum usb_dr_mode dr_mode;
 	struct usb_role_switch *role_sw;
+	enum usb_role current_role;
 	enum usb_dr_mode role_sw_default_mode;
 	unsigned int hcd_enabled:1;
 	unsigned int gadget_enabled:1;
@@ -1062,9 +1079,12 @@ struct dwc2_hsotg {
 	unsigned int hibernated:1;
 	unsigned int in_ppd:1;
 	bool bus_suspended;
+	bool rpm_suspended;
+	enum usb_device_state suspended_from;
 	unsigned int reset_phy_on_wake:1;
 	unsigned int need_phy_for_wake:1;
 	unsigned int phy_off_for_suspend:1;
+	bool gadget_off_for_suspend;
 	u16 frame_number;
 
 	struct phy *phy;
@@ -1086,7 +1106,11 @@ struct dwc2_hsotg {
 	unsigned int srp_success:1;
 
 	struct workqueue_struct *wq_otg;
+	struct workqueue_struct *wq_gadget;
 	struct work_struct wf_otg;
+	struct work_struct wf_gadget;
+	struct delayed_work dw_gsetup;
+	struct delayed_work dw_enumtimeout;
 	struct timer_list wkp_timer;
 	enum dwc2_lx_state lx_state;
 	struct dwc2_gregs_backup gr_backup;
@@ -1099,6 +1123,7 @@ struct dwc2_hsotg {
 
 	/* DWC OTG HW Release versions */
 #define DWC2_CORE_REV_4_30a	0x4f54430a
+#define DWC2_CORE_REV_2_70a	0x4f54270a
 #define DWC2_CORE_REV_2_71a	0x4f54271a
 #define DWC2_CORE_REV_2_72a     0x4f54272a
 #define DWC2_CORE_REV_2_80a	0x4f54280a
@@ -1208,10 +1233,17 @@ struct dwc2_hsotg {
 	struct usb_gadget gadget;
 	unsigned int enabled:1;
 	unsigned int connected:1;
+	unsigned int retry_connect:1;
 	unsigned int remote_wakeup_allowed:1;
+	unsigned int wakeup_configured:1;
 	struct dwc2_hsotg_ep *eps_in[MAX_EPS_CHANNELS];
 	struct dwc2_hsotg_ep *eps_out[MAX_EPS_CHANNELS];
 #endif /* CONFIG_USB_DWC2_PERIPHERAL || CONFIG_USB_DWC2_DUAL_ROLE */
+	struct power_supply *psy_batt_chg;
+	struct power_supply_desc batt_chg_psy_desc;
+	int chg_current;
+	enum power_supply_type batt_chg_psy_type;
+	bool has_batt_chg_det;
 };
 
 /* Normal architectures just use readl/write */
@@ -1302,10 +1334,8 @@ static inline bool dwc2_is_hs_iot(struct dwc2_hsotg *hsotg)
  * and the DWC_otg controller
  */
 int dwc2_core_reset(struct dwc2_hsotg *hsotg, bool skip_wait);
-int dwc2_enter_partial_power_down(struct dwc2_hsotg *hsotg);
 int dwc2_exit_partial_power_down(struct dwc2_hsotg *hsotg, int rem_wakeup,
 				 bool restore);
-int dwc2_enter_hibernation(struct dwc2_hsotg *hsotg, int is_host);
 int dwc2_exit_hibernation(struct dwc2_hsotg *hsotg, int rem_wakeup,
 		int reset, int is_host);
 void dwc2_init_fs_ls_pclk_sel(struct dwc2_hsotg *hsotg);
@@ -1395,11 +1425,18 @@ void dwc2_drd_exit(struct dwc2_hsotg *hsotg);
 void dwc2_dump_dev_registers(struct dwc2_hsotg *hsotg);
 void dwc2_dump_host_registers(struct dwc2_hsotg *hsotg);
 void dwc2_dump_global_registers(struct dwc2_hsotg *hsotg);
+int stm32mp2_usb2phy_batt_chg_det(struct dwc2_hsotg *hsotg);
+int stm32mp2_usb2phy_usb_chg_psy_register(struct dwc2_hsotg *hsotg);
+
+#define DWC2_POWER_DOWN_RESUME		0
+#define DWC2_POWER_DOWN_REMOTE_WKUP	1
+#define DWC2_POWER_DOWN_SESSION_END	2
 
 /* Gadget defines */
 #if IS_ENABLED(CONFIG_USB_DWC2_PERIPHERAL) || \
 	IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)
 int dwc2_hsotg_remove(struct dwc2_hsotg *hsotg);
+bool dwc2_gadget_can_poweroff_phy(struct dwc2_hsotg *hsotg);
 int dwc2_hsotg_suspend(struct dwc2_hsotg *dwc2);
 int dwc2_hsotg_resume(struct dwc2_hsotg *dwc2);
 int dwc2_gadget_init(struct dwc2_hsotg *hsotg);
@@ -1413,15 +1450,13 @@ int dwc2_hsotg_set_test_mode(struct dwc2_hsotg *hsotg, int testmode);
 #define dwc2_is_device_enabled(hsotg) (hsotg->enabled)
 int dwc2_backup_device_registers(struct dwc2_hsotg *hsotg);
 int dwc2_restore_device_registers(struct dwc2_hsotg *hsotg, int remote_wakeup);
-int dwc2_gadget_enter_hibernation(struct dwc2_hsotg *hsotg);
 int dwc2_gadget_exit_hibernation(struct dwc2_hsotg *hsotg,
 				 int rem_wakeup, int reset);
-int dwc2_gadget_enter_partial_power_down(struct dwc2_hsotg *hsotg);
 int dwc2_gadget_exit_partial_power_down(struct dwc2_hsotg *hsotg,
-					bool restore);
-void dwc2_gadget_enter_clock_gating(struct dwc2_hsotg *hsotg);
+					int rem_wakeup, bool restore);
 void dwc2_gadget_exit_clock_gating(struct dwc2_hsotg *hsotg,
 				   int rem_wakeup);
+int dwc2_gadget_enter_lp(struct dwc2_hsotg *hsotg);
 int dwc2_hsotg_tx_fifo_count(struct dwc2_hsotg *hsotg);
 int dwc2_hsotg_tx_fifo_total_depth(struct dwc2_hsotg *hsotg);
 int dwc2_hsotg_tx_fifo_average_depth(struct dwc2_hsotg *hsotg);
@@ -1432,6 +1467,8 @@ static inline void dwc2_clear_fifo_map(struct dwc2_hsotg *hsotg)
 #else
 static inline int dwc2_hsotg_remove(struct dwc2_hsotg *dwc2)
 { return 0; }
+static inline bool dwc2_gadget_can_poweroff_phy(struct dwc2_hsotg *hsotg)
+{ return false; }
 static inline int dwc2_hsotg_suspend(struct dwc2_hsotg *dwc2)
 { return 0; }
 static inline int dwc2_hsotg_resume(struct dwc2_hsotg *dwc2)
@@ -1453,19 +1490,16 @@ static inline int dwc2_backup_device_registers(struct dwc2_hsotg *hsotg)
 static inline int dwc2_restore_device_registers(struct dwc2_hsotg *hsotg,
 						int remote_wakeup)
 { return 0; }
-static inline int dwc2_gadget_enter_hibernation(struct dwc2_hsotg *hsotg)
-{ return 0; }
 static inline int dwc2_gadget_exit_hibernation(struct dwc2_hsotg *hsotg,
 					       int rem_wakeup, int reset)
 { return 0; }
-static inline int dwc2_gadget_enter_partial_power_down(struct dwc2_hsotg *hsotg)
-{ return 0; }
 static inline int dwc2_gadget_exit_partial_power_down(struct dwc2_hsotg *hsotg,
-						      bool restore)
+						      int rem_wakeup, bool restore)
 { return 0; }
-static inline void dwc2_gadget_enter_clock_gating(struct dwc2_hsotg *hsotg) {}
 static inline void dwc2_gadget_exit_clock_gating(struct dwc2_hsotg *hsotg,
 						 int rem_wakeup) {}
+static inline int dwc2_gadget_enter_lp(struct dwc2_hsotg *hsotg)
+{ return 0; }
 static inline int dwc2_hsotg_tx_fifo_count(struct dwc2_hsotg *hsotg)
 { return 0; }
 static inline int dwc2_hsotg_tx_fifo_total_depth(struct dwc2_hsotg *hsotg)
@@ -1488,14 +1522,12 @@ int dwc2_port_suspend(struct dwc2_hsotg *hsotg, u16 windex);
 int dwc2_port_resume(struct dwc2_hsotg *hsotg);
 int dwc2_backup_host_registers(struct dwc2_hsotg *hsotg);
 int dwc2_restore_host_registers(struct dwc2_hsotg *hsotg);
-int dwc2_host_enter_hibernation(struct dwc2_hsotg *hsotg);
 int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg,
 			       int rem_wakeup, int reset);
-int dwc2_host_enter_partial_power_down(struct dwc2_hsotg *hsotg);
 int dwc2_host_exit_partial_power_down(struct dwc2_hsotg *hsotg,
 				      int rem_wakeup, bool restore);
-void dwc2_host_enter_clock_gating(struct dwc2_hsotg *hsotg);
 void dwc2_host_exit_clock_gating(struct dwc2_hsotg *hsotg, int rem_wakeup);
+int dwc2_host_enter_lp(struct dwc2_hsotg *hsotg);
 bool dwc2_host_can_poweroff_phy(struct dwc2_hsotg *dwc2);
 static inline void dwc2_host_schedule_phy_reset(struct dwc2_hsotg *hsotg)
 { schedule_work(&hsotg->phy_reset_work); }
@@ -1521,19 +1553,16 @@ static inline int dwc2_backup_host_registers(struct dwc2_hsotg *hsotg)
 { return 0; }
 static inline int dwc2_restore_host_registers(struct dwc2_hsotg *hsotg)
 { return 0; }
-static inline int dwc2_host_enter_hibernation(struct dwc2_hsotg *hsotg)
-{ return 0; }
 static inline int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg,
 					     int rem_wakeup, int reset)
-{ return 0; }
-static inline int dwc2_host_enter_partial_power_down(struct dwc2_hsotg *hsotg)
 { return 0; }
 static inline int dwc2_host_exit_partial_power_down(struct dwc2_hsotg *hsotg,
 						    int rem_wakeup, bool restore)
 { return 0; }
-static inline void dwc2_host_enter_clock_gating(struct dwc2_hsotg *hsotg) {}
 static inline void dwc2_host_exit_clock_gating(struct dwc2_hsotg *hsotg,
 					       int rem_wakeup) {}
+static inline int dwc2_host_enter_lp(struct dwc2_hsotg *hsotg)
+{ return 0; }
 static inline bool dwc2_host_can_poweroff_phy(struct dwc2_hsotg *dwc2)
 { return false; }
 static inline void dwc2_host_schedule_phy_reset(struct dwc2_hsotg *hsotg) {}

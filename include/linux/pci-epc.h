@@ -154,6 +154,7 @@ struct pci_epc {
 
 /**
  * struct pci_epc_features - features supported by a EPC device per function
+ * @force_core_init: indicate if the EPC device can initialize when binding
  * @linkup_notifier: indicate if the EPC device can notify EPF driver on link up
  * @core_init_notifier: indicate cores that can notify about their availability
  *			for initialization
@@ -165,6 +166,7 @@ struct pci_epc {
  * @align: alignment size required for BAR buffer allocation
  */
 struct pci_epc_features {
+	unsigned int	force_core_init : 1;
 	unsigned int	linkup_notifier : 1;
 	unsigned int	core_init_notifier : 1;
 	unsigned int	msi_capable : 1;
@@ -205,6 +207,7 @@ int pci_epc_add_epf(struct pci_epc *epc, struct pci_epf *epf,
 void pci_epc_linkup(struct pci_epc *epc);
 void pci_epc_linkdown(struct pci_epc *epc);
 void pci_epc_init_notify(struct pci_epc *epc);
+void pci_epc_deinit_notify(struct pci_epc *epc);
 void pci_epc_bme_notify(struct pci_epc *epc);
 void pci_epc_remove_epf(struct pci_epc *epc, struct pci_epf *epf,
 			enum pci_epc_interface_type type);

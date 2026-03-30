@@ -7,9 +7,11 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/iopoll.h>
+#include <linux/mfd/syscon.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/card.h>
 #include <linux/of_address.h>
+#include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/scatterlist.h>
 #include "mmci.h"
@@ -59,6 +61,9 @@ struct sdmmc_idma {
 	dma_addr_t bounce_dma_addr;
 	void *bounce_buf;
 	bool use_bounce_buffer;
+	struct regmap *arcr_regmap;
+	u32 arcr_offset;
+	u32 arcr_mask;
 };
 
 struct sdmmc_dlyb;
@@ -75,6 +80,7 @@ struct sdmmc_dlyb {
 	void __iomem *base;
 	u32 unit;
 	u32 max;
+	unsigned int min_freq;
 	struct sdmmc_tuning_ops *ops;
 };
 
@@ -189,6 +195,8 @@ static int sdmmc_idma_setup(struct mmci_host *host)
 {
 	struct sdmmc_idma *idma;
 	struct device *dev = mmc_dev(host->mmc);
+	struct device_node *np = host->mmc->parent->of_node;
+	int ret;
 
 	idma = devm_kzalloc(dev, sizeof(*idma), GFP_KERNEL);
 	if (!idma)
@@ -213,6 +221,22 @@ static int sdmmc_idma_setup(struct mmci_host *host)
 		host->mmc->max_seg_size = host->mmc->max_req_size;
 	}
 
+	idma->arcr_regmap = syscon_regmap_lookup_by_phandle_optional(np, "st,syscfg-arcr");
+	if (idma->arcr_regmap) {
+		if (IS_ERR(idma->arcr_regmap))
+			return PTR_ERR(idma->arcr_regmap);
+
+		ret = of_property_read_u32_index(np, "st,syscfg-arcr", 1,
+						 &idma->arcr_offset);
+		if (ret)
+			return ret;
+
+		ret = of_property_read_u32_index(np, "st,syscfg-arcr", 2,
+						 &idma->arcr_mask);
+		if (ret)
+			return ret;
+	}
+
 	return dma_set_max_seg_size(dev, host->mmc->max_seg_size);
 }
 
@@ -223,9 +247,18 @@ static int sdmmc_idma_start(struct mmci_host *host, unsigned int *datactrl)
 	struct sdmmc_lli_desc *desc = (struct sdmmc_lli_desc *)idma->sg_cpu;
 	struct mmc_data *data = host->data;
 	struct scatterlist *sg;
+	struct device *dev = mmc_dev(host->mmc);
 	int i;
 
 	host->dma_in_progress = true;
+
+	if (idma->arcr_regmap && dev->dma_range_map) {
+		u32 arcr;
+
+		regmap_update_bits(idma->arcr_regmap, idma->arcr_offset,
+				   idma->arcr_mask, idma->arcr_mask);
+		regmap_read(idma->arcr_regmap, idma->arcr_offset, &arcr);
+	}
 
 	if (!host->variant->dma_lli || data->sg_len == 1 ||
 	    idma->use_bounce_buffer) {
@@ -269,6 +302,7 @@ static void sdmmc_idma_error(struct mmci_host *host)
 {
 	struct mmc_data *data = host->data;
 	struct sdmmc_idma *idma = host->dma_priv;
+	struct device *dev = mmc_dev(host->mmc);
 
 	if (!dma_inprogress(host))
 		return;
@@ -277,6 +311,10 @@ static void sdmmc_idma_error(struct mmci_host *host)
 	host->dma_in_progress = false;
 	data->host_cookie = 0;
 
+	if (idma->arcr_regmap && dev->dma_range_map)
+		regmap_update_bits(idma->arcr_regmap, idma->arcr_offset,
+				   idma->arcr_mask, 0);
+
 	if (!idma->use_bounce_buffer)
 		dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
 			     mmc_get_dma_dir(data));
@@ -284,11 +322,18 @@ static void sdmmc_idma_error(struct mmci_host *host)
 
 static void sdmmc_idma_finalize(struct mmci_host *host, struct mmc_data *data)
 {
+	struct sdmmc_idma *idma = host->dma_priv;
+	struct device *dev = mmc_dev(host->mmc);
+
 	if (!dma_inprogress(host))
 		return;
 
 	writel_relaxed(0, host->base + MMCI_STM32_IDMACTRLR);
 	host->dma_in_progress = false;
+
+	if (idma->arcr_regmap && dev->dma_range_map)
+		regmap_update_bits(idma->arcr_regmap, idma->arcr_offset,
+				   idma->arcr_mask, 0);
 
 	if (!data->host_cookie)
 		sdmmc_idma_unprep_data(host, data, 0);
@@ -367,7 +412,8 @@ static void mmci_sdmmc_set_pwrreg(struct mmci_host *host, unsigned int pwr)
 	if (dlyb && dlyb->ops->set_input_ck)
 		dlyb->ops->set_input_ck(dlyb);
 
-	if (ios.power_mode == MMC_POWER_OFF) {
+	if (ios.power_mode == MMC_POWER_OFF ||
+	    ios.power_mode == MMC_POWER_UP) {
 		/* Only a reset could power-off sdmmc */
 		reset_control_assert(host->rst);
 		udelay(2);
@@ -536,10 +582,20 @@ static int sdmmc_dlyb_mp15_prepare(struct mmci_host *host)
 static int sdmmc_dlyb_mp25_enable(struct sdmmc_dlyb *dlyb)
 {
 	u32 cr, sr;
+	int ret;
 
 	cr = readl_relaxed(dlyb->base + SYSCFG_DLYBSD_CR);
-	cr |= DLYBSD_CR_EN;
 
+	cr &= ~DLYBSD_CR_EN;
+	writel_relaxed(cr, dlyb->base + SYSCFG_DLYBSD_CR);
+
+	ret = readl_relaxed_poll_timeout(dlyb->base + SYSCFG_DLYBSD_SR,
+					 sr, !(sr & DLYBSD_SR_LOCK), 1,
+					 DLYBSD_TIMEOUT_1S_IN_US);
+	if (ret)
+		return ret;
+
+	cr |= DLYBSD_CR_EN;
 	writel_relaxed(cr, dlyb->base + SYSCFG_DLYBSD_CR);
 
 	return readl_relaxed_poll_timeout(dlyb->base + SYSCFG_DLYBSD_SR,
@@ -627,7 +683,7 @@ static int sdmmc_execute_tuning(struct mmc_host *mmc, u32 opcode)
 
 	if ((host->mmc->ios.timing != MMC_TIMING_UHS_SDR104 &&
 	     host->mmc->ios.timing != MMC_TIMING_MMC_HS200) ||
-	    host->mmc->actual_clock <= 50000000)
+	    host->mmc->actual_clock <= dlyb->min_freq)
 		return 0;
 
 	if (!dlyb || !dlyb->base)
@@ -738,10 +794,13 @@ void sdmmc_variant_init(struct mmci_host *host)
 		return;
 
 	dlyb->base = base_dlyb;
-	if (of_device_is_compatible(np, "st,stm32mp25-sdmmc2"))
+	if (of_device_is_compatible(np, "st,stm32mp25-sdmmc2")) {
 		dlyb->ops = &dlyb_tuning_mp25_ops;
-	else
+		dlyb->min_freq = 100000000;
+	} else {
 		dlyb->ops = &dlyb_tuning_mp15_ops;
+		dlyb->min_freq = 50000000;
+	}
 
 	host->variant_priv = dlyb;
 	host->mmc_ops->execute_tuning = sdmmc_execute_tuning;

@@ -79,6 +79,10 @@ properties:
           - const: rx
           - const: tx
 
+  access-controllers:
+    minItems: 1
+    maxItems: 2
+
   power-domains: true
 
   resets:
@@ -162,6 +166,16 @@ properties:
     maxItems: 1
     description:
       The GPIO matching the CKIN pin.
+
+  st,syscfg-arcr:
+    description: ST Micro-specific property, use to enable address remapping
+      to allow to access the 4 GB of the DDR.
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    items:
+      - items:
+          - description: phandle to syscfg
+          - description: register offset within syscfg
+          - description: register bitmask for address remapping bit
 
 dependencies:
   st,cmd-gpios: [ "st,use-ckin" ]

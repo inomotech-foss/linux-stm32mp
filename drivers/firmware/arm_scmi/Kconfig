@@ -180,6 +180,12 @@ config ARM_SCMI_TRANSPORT_VIRTIO_ATOMIC_ENABLE
 	  in atomic context too, at the price of using a number of busy-waiting
 	  primitives all over instead. If unsure say N.
 
+config SCMI_STM32MP_OSTL_V5
+	bool "Support for STM32MP legacy SCMI messages in OSTL distributions"
+	help
+	  Enable support for legacy SCMI message IDs used in STM32MP OSTL
+	  distributions, from its version v4.0 up to v5.0. If unsure, say N.
+
 endif #ARM_SCMI_PROTOCOL
 
 config ARM_SCMI_POWER_DOMAIN
@@ -194,6 +200,18 @@ config ARM_SCMI_POWER_DOMAIN
 	  This driver can also be built as a module.  If so, the module
 	  will be called scmi_pm_domain. Note this may needed early in boot
 	  before rootfs may be available.
+
+config ARM_SCMI_PERF_DOMAIN
+	tristate "SCMI performance domain driver"
+	depends on ARM_SCMI_PROTOCOL || (COMPILE_TEST && OF)
+	default y
+	select PM_GENERIC_DOMAINS if PM
+	help
+	  This enables support for the SCMI performance domains which can be
+	  enabled or disabled via the SCP firmware.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called scmi_perf_domain.
 
 config ARM_SCMI_POWER_CONTROL
 	tristate "SCMI system power control driver"

@@ -838,6 +838,10 @@ struct v4l2_pix_format {
 #define V4L2_META_FMT_RK_ISP1_PARAMS	v4l2_fourcc('R', 'K', '1', 'P') /* Rockchip ISP1 3A Parameters */
 #define V4L2_META_FMT_RK_ISP1_STAT_3A	v4l2_fourcc('R', 'K', '1', 'S') /* Rockchip ISP1 3A Statistics */
 
+/* Vendor specific - used for STM32_DCMIPP camera sub-system */
+#define V4L2_META_FMT_ST_DCMIPP_ISP_PARAMS	v4l2_fourcc('S', 'T', 'I', 'P') /* STM32 DCMIPP ISP Parameters */
+#define V4L2_META_FMT_ST_DCMIPP_ISP_STAT	v4l2_fourcc('S', 'T', 'I', 'S') /* STM32 DCMIPP ISP Statistics */
+
 /* priv field value to indicates that subsequent fields are valid. */
 #define V4L2_PIX_FMT_PRIV_MAGIC		0xfeedcafe
 
@@ -1836,6 +1840,7 @@ struct v4l2_ext_control {
 		struct v4l2_ctrl_av1_tile_group_entry __user *p_av1_tile_group_entry;
 		struct v4l2_ctrl_av1_frame __user *p_av1_frame;
 		struct v4l2_ctrl_av1_film_grain __user *p_av1_film_grain;
+		struct v4l2_ctrl_vp8_encode_params __user *p_vp8_encode_params;
 		void __user *ptr;
 	};
 } __attribute__ ((packed));
@@ -1892,10 +1897,13 @@ enum v4l2_ctrl_type {
 	V4L2_CTRL_TYPE_H264_SLICE_PARAMS    = 0x0203,
 	V4L2_CTRL_TYPE_H264_DECODE_PARAMS   = 0x0204,
 	V4L2_CTRL_TYPE_H264_PRED_WEIGHTS    = 0x0205,
+	V4L2_CTRL_TYPE_H264_ENCODE_PARAMS   = 0x0210,
+	V4L2_CTRL_TYPE_H264_ENCODE_RC       = 0x0211,
 
 	V4L2_CTRL_TYPE_FWHT_PARAMS	    = 0x0220,
 
 	V4L2_CTRL_TYPE_VP8_FRAME            = 0x0240,
+	V4L2_CTRL_TYPE_VP8_ENCODE_PARAMS    = 0x0241,
 
 	V4L2_CTRL_TYPE_MPEG2_QUANTISATION   = 0x0250,
 	V4L2_CTRL_TYPE_MPEG2_SEQUENCE       = 0x0251,
@@ -1914,6 +1922,8 @@ enum v4l2_ctrl_type {
 	V4L2_CTRL_TYPE_AV1_TILE_GROUP_ENTRY = 0x281,
 	V4L2_CTRL_TYPE_AV1_FRAME	    = 0x282,
 	V4L2_CTRL_TYPE_AV1_FILM_GRAIN	    = 0x283,
+
+	V4L2_CTRL_TYPE_ISP_STAT_REGION     = 0x0310,
 };
 
 /*  Used in the VIDIOC_QUERYCTRL ioctl for querying controls */

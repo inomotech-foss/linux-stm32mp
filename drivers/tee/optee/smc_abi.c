@@ -507,7 +507,7 @@ static int optee_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 	msg_arg->params->u.tmem.buf_ptr = virt_to_phys(pages_list) |
 	  (tee_shm_get_page_offset(shm) & (OPTEE_MSG_NONCONTIG_PAGE_SIZE - 1));
 
-	if (optee->ops->do_call_with_arg(ctx, shm_arg, 0) ||
+	if (optee->ops->do_call_with_arg(ctx, shm_arg, 0, NULL) ||
 	    msg_arg->ret != TEEC_SUCCESS)
 		rc = -EINVAL;
 
@@ -550,7 +550,7 @@ static int optee_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
 	msg_arg->params[0].attr = OPTEE_MSG_ATTR_TYPE_RMEM_INPUT;
 	msg_arg->params[0].u.rmem.shm_ref = (unsigned long)shm;
 
-	if (optee->ops->do_call_with_arg(ctx, shm_arg, 0) ||
+	if (optee->ops->do_call_with_arg(ctx, shm_arg, 0, NULL) ||
 	    msg_arg->ret != TEEC_SUCCESS)
 		rc = -EINVAL;
 out:
@@ -885,14 +885,30 @@ static void optee_handle_rpc(struct tee_context *ctx,
  * Returns return code from secure world, 0 is OK
  */
 static int optee_smc_do_call_with_arg(struct tee_context *ctx,
-				      struct tee_shm *shm, u_int offs)
+				      struct tee_shm *shm, u_int offs,
+				      struct optee_call_extra *extra)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
-	struct optee_call_waiter w;
+	struct optee_call_waiter waiter;
+	struct optee_call_waiter *w = &waiter;
 	struct optee_rpc_param param = { };
 	struct optee_call_ctx call_ctx = { };
 	struct optee_msg_arg *rpc_arg = NULL;
 	int rc;
+
+	if (extra) {
+		if (tee_ocall_is_used(extra->ocall_arg))
+			w = extra->ocall_call_waiter;
+
+		if (tee_ocall_in_progress(extra->ocall_arg)) {
+			/* We are returning to TEE from an Ocall in REE */
+			param.a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
+			param.a1 = extra->ocall_arg->out_param1;
+			param.a2 = extra->ocall_arg->out_param2;
+			param.a3 = extra->tee_thread_id;
+			goto call_optee;
+		}
+	}
 
 	if (optee->rpc_param_count) {
 		struct optee_msg_arg *arg;
@@ -909,7 +925,11 @@ static int optee_smc_do_call_with_arg(struct tee_context *ctx,
 	}
 
 	if  (rpc_arg && tee_shm_is_dynamic(shm)) {
-		param.a0 = OPTEE_SMC_CALL_WITH_REGD_ARG;
+		if (optee->noirq_enabled)
+			param.a0 = OPTEE_SMC_CALL_WITH_REGD_ARG_NSEC_NOIRQ;
+		else
+			param.a0 = OPTEE_SMC_CALL_WITH_REGD_ARG;
+
 		reg_pair_from_64(&param.a1, &param.a2, (u_long)shm);
 		param.a3 = offs;
 	} else {
@@ -919,14 +939,24 @@ static int optee_smc_do_call_with_arg(struct tee_context *ctx,
 		if (rc)
 			return rc;
 
-		if (rpc_arg)
-			param.a0 = OPTEE_SMC_CALL_WITH_RPC_ARG;
-		else
-			param.a0 = OPTEE_SMC_CALL_WITH_ARG;
+		if (rpc_arg) {
+			if (optee->noirq_enabled)
+				param.a0 =
+					OPTEE_SMC_CALL_WITH_RPC_ARG_NSEC_NOIRQ;
+			else
+				param.a0 = OPTEE_SMC_CALL_WITH_RPC_ARG;
+		} else {
+			if (optee->noirq_enabled)
+				param.a0 = OPTEE_SMC_CALL_WITH_ARG_NSEC_NOIRQ;
+			else
+				param.a0 = OPTEE_SMC_CALL_WITH_ARG;
+		}
 		reg_pair_from_64(&param.a1, &param.a2, parg);
 	}
 	/* Initialize waiter */
-	optee_cq_wait_init(&optee->call_queue, &w);
+	optee_cq_wait_init(&optee->call_queue, w);
+
+call_optee:
 	while (true) {
 		struct arm_smccc_res res;
 
@@ -941,7 +971,24 @@ static int optee_smc_do_call_with_arg(struct tee_context *ctx,
 			 * Out of threads in secure world, wait for a thread
 			 * become available.
 			 */
-			optee_cq_wait_for_completion(&optee->call_queue, &w);
+			optee_cq_wait_for_completion(&optee->call_queue, w);
+		} else if (res.a0 == OPTEE_SMC_RETURN_RPC_OCALL2) {
+			cond_resched();
+			if (extra && tee_ocall_is_used(extra->ocall_arg)) {
+				extra->ocall_arg->state = TEE_OCALL2_IN_PROGRESS;
+				extra->ocall_arg->in_param1 = res.a1;
+				extra->ocall_arg->in_param2 = res.a2;
+				extra->ocall_arg->out_param1 = TEE_OCALL2_OUT_PARAM1_ERROR;
+				extra->ocall_arg->out_param2 = 0;
+				extra->tee_thread_id = res.a3;
+
+				return -EAGAIN;
+			}
+
+			WARN_ONCE(1, "optee unexpected Ocall2\n");
+			param.a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
+			param.a1 = TEE_OCALL2_OUT_PARAM1_ERROR;
+			param.a2 = 0;
 		} else if (OPTEE_SMC_RETURN_IS_RPC(res.a0)) {
 			cond_resched();
 			param.a0 = res.a0;
@@ -955,12 +1002,18 @@ static int optee_smc_do_call_with_arg(struct tee_context *ctx,
 		}
 	}
 
+	if (extra && tee_ocall_is_used(extra->ocall_arg)) {
+		w = extra->ocall_call_waiter;
+		extra->ocall_arg->state = TEE_OCALL2_IDLE;
+		extra->tee_thread_id = 0;
+	}
+
 	optee_rpc_finalize_call(&call_ctx);
 	/*
 	 * We're done with our thread in secure world, if there's any
 	 * thread waiters wake up one.
 	 */
-	optee_cq_wait_final(&optee->call_queue, &w);
+	optee_cq_wait_final(&optee->call_queue, w);
 
 	return rc;
 }
@@ -977,7 +1030,7 @@ static int simple_call_with_arg(struct tee_context *ctx, u32 cmd)
 		return PTR_ERR(msg_arg);
 
 	msg_arg->cmd = cmd;
-	optee_smc_do_call_with_arg(ctx, shm, offs);
+	optee_smc_do_call_with_arg(ctx, shm, offs, NULL);
 
 	optee_free_msg_arg(ctx, entry, offs);
 	return 0;
@@ -996,6 +1049,129 @@ static int optee_smc_stop_async_notif(struct tee_context *ctx)
 /*
  * 5. Asynchronous notification
  */
+
+static int get_it_value(optee_invoke_fn *invoke_fn, bool *value_valid,
+			bool *value_pending)
+{
+	struct arm_smccc_res res;
+
+	invoke_fn(OPTEE_SMC_GET_IT_NOTIF_VALUE, 0, 0, 0, 0, 0, 0, 0, &res);
+
+	if (res.a0)
+		return -1;
+
+	*value_valid = res.a2 & OPTEE_SMC_IT_NOTIF_VALUE_VALID;
+	*value_pending = res.a2 & OPTEE_SMC_IT_NOTIF_VALUE_PENDING;
+	return (int)res.a1;
+}
+
+static void set_it_mask(optee_invoke_fn *invoke_fn, u32 it_value, bool mask)
+{
+	struct arm_smccc_res res;
+
+	invoke_fn(OPTEE_SMC_SET_IT_NOTIF_MASK, it_value, mask, 0, 0, 0, 0, 0, &res);
+}
+
+static int handle_optee_it(struct optee *optee)
+{
+	bool value_valid;
+	bool value_pending;
+	u32 it;
+
+	do {
+		struct irq_desc *desc;
+		int it_id;
+
+		it_id = get_it_value(optee->smc.invoke_fn, &value_valid, &value_pending);
+		if (it_id < 0) {
+			/*
+			 * OP-TEE interrupt notification is not supported
+			 * hence disable the feature so that current function
+			 * is no more called and we handle async value
+			 * OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_IT as a generic legacy
+			 * OP-TEE async notif.
+			 */
+			optee->itr_notif = false;
+			optee_notif_send(optee, OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_IT);
+			return 0;
+		}
+		it = (u32)it_id;
+
+		if (!value_valid)
+			break;
+
+		desc = irq_to_desc(irq_find_mapping(optee->smc.domain, it));
+		if (!desc) {
+			pr_err("no desc for optee IT:%d\n", it);
+			return -EIO;
+		}
+
+		handle_simple_irq(desc);
+
+	} while (value_pending);
+
+	return 0;
+}
+
+static void optee_it_irq_mask(struct irq_data *d)
+{
+	struct optee *optee = d->domain->host_data;
+
+	set_it_mask(optee->smc.invoke_fn, d->hwirq, true);
+}
+
+static void optee_it_irq_unmask(struct irq_data *d)
+{
+	struct optee *optee = d->domain->host_data;
+
+	set_it_mask(optee->smc.invoke_fn, d->hwirq, false);
+}
+
+static struct irq_chip optee_it_irq_chip = {
+	.name = "optee-it",
+	.irq_disable = optee_it_irq_mask,
+	.irq_enable = optee_it_irq_unmask,
+	.flags = IRQCHIP_SKIP_SET_WAKE,
+};
+
+static int optee_it_alloc(struct irq_domain *d, unsigned int virq,
+			  unsigned int nr_irqs, void *data)
+{
+	struct irq_fwspec *fwspec = data;
+	irq_hw_number_t hwirq;
+
+	hwirq = fwspec->param[0];
+
+	irq_domain_set_info(d, virq, hwirq, &optee_it_irq_chip, d->host_data,
+			    handle_simple_irq, NULL, NULL);
+
+	return 0;
+}
+
+static const struct irq_domain_ops optee_it_irq_domain_ops = {
+	.alloc = optee_it_alloc,
+	.free = irq_domain_free_irqs_common,
+};
+
+static int optee_irq_domain_init(struct platform_device *pdev, struct optee *optee)
+{
+	struct device *dev = &pdev->dev;
+	struct device_node *np = dev->of_node;
+
+	optee->smc.domain = irq_domain_add_linear(np, OPTEE_MAX_IT,
+						  &optee_it_irq_domain_ops, optee);
+	if (!optee->smc.domain) {
+		dev_err(dev, "Unable to add irq domain\n");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void optee_irq_domain_uninit(struct optee *optee)
+{
+	irq_domain_remove(optee->smc.domain);
+}
 
 static u32 get_async_notif_value(optee_invoke_fn *invoke_fn, bool *value_valid,
 				 bool *value_pending)
@@ -1028,6 +1204,8 @@ static irqreturn_t irq_handler(struct optee *optee)
 
 		if (value == OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_BOTTOM_HALF)
 			do_bottom_half = true;
+		else if (optee->itr_notif && value == OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_IT)
+			handle_optee_it(optee);
 		else
 			optee_notif_send(optee, value);
 	} while (value_pending);
@@ -1204,6 +1382,14 @@ static int optee_smc_open(struct tee_context *ctx)
 	return optee_open(ctx, sec_caps & OPTEE_SMC_SEC_CAP_MEMREF_NULL);
 }
 
+int optee_invoke_func_ocall2(struct tee_context *ctx,
+			     struct tee_ioctl_invoke_arg *arg,
+			     struct tee_param *param,
+			     struct tee_ocall2_arg *ocall_arg)
+{
+	return optee_invoke_func_helper(ctx, arg, param, ocall_arg);
+}
+
 static const struct tee_driver_ops optee_clnt_ops = {
 	.get_version = optee_get_version,
 	.open = optee_smc_open,
@@ -1211,6 +1397,7 @@ static const struct tee_driver_ops optee_clnt_ops = {
 	.open_session = optee_open_session,
 	.close_session = optee_close_session,
 	.invoke_func = optee_invoke_func,
+	.invoke_func_ocall2 = optee_invoke_func_ocall2,
 	.cancel_req = optee_cancel_req,
 	.shm_register = optee_shm_register,
 	.shm_unregister = optee_shm_unregister,
@@ -1464,6 +1651,8 @@ static int optee_smc_remove(struct platform_device *pdev)
 
 	optee_smc_notif_uninit_irq(optee);
 
+	optee_irq_domain_uninit(optee);
+
 	optee_remove_common(optee);
 
 	if (optee->smc.memremaped_shm)
@@ -1602,6 +1791,32 @@ static inline int optee_load_fw(struct platform_device *pdev,
 }
 #endif
 
+/*
+ * Hook on PM late ops to switch OP-TEE standard SMC invocation
+ * for supporting PM_NOIRQ sequences.
+ */
+static int optee_suspend_noirq(struct device *dev)
+{
+	struct optee *optee = dev_get_drvdata(dev);
+
+	optee->noirq_enabled = optee->smc.sec_caps & OPTEE_SMC_SEC_CAP_PM_NOIRQ;
+
+	return 0;
+}
+
+static int optee_resume_noirq(struct device *dev)
+{
+	struct optee *optee = dev_get_drvdata(dev);
+
+	optee->noirq_enabled = false;
+
+	return 0;
+}
+
+static const struct dev_pm_ops optee_pm_ops = {
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(optee_suspend_noirq, optee_resume_noirq)
+};
+
 static int optee_probe(struct platform_device *pdev)
 {
 	optee_invoke_fn *invoke_fn;
@@ -1703,6 +1918,15 @@ static int optee_probe(struct platform_device *pdev)
 	optee->smc.sec_caps = sec_caps;
 	optee->rpc_param_count = rpc_param_count;
 
+	/*
+	 * Default assume OP-TEE interrupt notification through async notif
+	 * value 1 (OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_IT) is supported.
+	 * The feature will be disabled if we find SMC function ID
+	 * OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_IT is not supported, meaning OP-TEE
+	 * async value 1 is a generic legacy async notif value.
+	 */
+	optee->itr_notif = true;
+
 	teedev = tee_device_alloc(&optee_clnt_desc, NULL, pool, optee);
 	if (IS_ERR(teedev)) {
 		rc = PTR_ERR(teedev);
@@ -1758,6 +1982,20 @@ static int optee_probe(struct platform_device *pdev)
 			irq_dispose_mapping(irq);
 			goto err_notif_uninit;
 		}
+
+		if (optee->itr_notif) {
+			rc = optee_irq_domain_init(pdev, optee);
+			if (rc) {
+				if (irq_is_percpu_devid(optee->smc.notif_irq))
+					uninit_pcpu_irq(optee);
+				else
+					free_irq(optee->smc.notif_irq, optee);
+
+				irq_dispose_mapping(irq);
+				goto err_notif_uninit;
+			}
+		}
+
 		enable_async_notif(optee->smc.invoke_fn);
 		pr_info("Asynchronous notifications enabled\n");
 	}
@@ -1827,6 +2065,7 @@ static struct platform_driver optee_driver = {
 	.driver = {
 		.name = "optee",
 		.of_match_table = optee_dt_match,
+		.pm = pm_ptr(&optee_pm_ops),
 	},
 };
 

@@ -35,6 +35,9 @@
  */
 #define OPTEE_DEFAULT_MAX_NOTIF_VALUE	255
 
+/* This value should be larger than max interrupt ID notified by secure world */
+#define OPTEE_MAX_IT 32
+
 typedef void (optee_invoke_fn)(unsigned long, unsigned long, unsigned long,
 				unsigned long, unsigned long, unsigned long,
 				unsigned long, unsigned long,
@@ -113,6 +116,7 @@ struct optee_pcpu {
  * @notif_pcpu_wq	workqueue for per cpu asynchronous notification or NULL
  * @notif_pcpu_work	work for per cpu asynchronous notification
  * @notif_cpuhp_state   CPU hotplug state assigned for pcpu interrupt management
+ * @domain		interrupt domain registered by OP-TEE driver
  */
 struct optee_smc {
 	optee_invoke_fn *invoke_fn;
@@ -123,6 +127,7 @@ struct optee_smc {
 	struct workqueue_struct *notif_pcpu_wq;
 	struct work_struct notif_pcpu_work;
 	unsigned int notif_cpuhp_state;
+	struct irq_domain *domain;
 };
 
 /**
@@ -143,6 +148,18 @@ struct optee_ffa {
 struct optee;
 
 /**
+ * struct optee_call_extra - Extra data used by calling TEE
+ * @ocall_arg: OCall arguments related to the call or NULL
+ * @tee_thread_id: TEE thread ID to use to return from an OCall, or 0
+ * @ocall_call_waiter: Reference to the waiter that tracks TEE entry
+ */
+struct optee_call_extra {
+	struct tee_ocall2_arg *ocall_arg;
+	u32 tee_thread_id;
+	struct optee_call_waiter *ocall_call_waiter;
+};
+
+/**
  * struct optee_ops - OP-TEE driver internal operations
  * @do_call_with_arg:	enters OP-TEE in secure world
  * @to_msg_param:	converts from struct tee_param to OPTEE_MSG parameters
@@ -154,7 +171,8 @@ struct optee;
  */
 struct optee_ops {
 	int (*do_call_with_arg)(struct tee_context *ctx,
-				struct tee_shm *shm_arg, u_int offs);
+				struct tee_shm *shm_arg, u_int offs,
+				struct optee_call_extra *extra);
 	int (*to_msg_param)(struct optee *optee,
 			    struct optee_msg_param *msg_params,
 			    size_t num_params, const struct tee_param *params);
@@ -180,6 +198,8 @@ struct optee_ops {
  * @scan_bus_done	flag if device registation was already done.
  * @scan_bus_wq		workqueue to scan optee bus and register optee drivers
  * @scan_bus_work	workq to scan optee bus and register optee drivers
+ * @itr_notif		True if OP-TEE offers interrupt notification
+ * @noirq_enabled	True if OP-TEE invokes in PM_NOIRQ context
  */
 struct optee {
 	struct tee_device *supp_teedev;
@@ -199,11 +219,38 @@ struct optee {
 	bool   scan_bus_done;
 	struct workqueue_struct *scan_bus_wq;
 	struct work_struct scan_bus_work;
+	bool itr_notif;
+	bool noirq_enabled;
 };
 
+/**
+ * struct tee_session_ocall - Ocall context of a session
+ * @thread_p1:    TEE thread ID plus 1 (0 means no suspended TEE thread)
+ * @call_waiter:  Waiter for the call entry completed at Ocall return entry
+ * @call_arg:     Invocation argument from initial call that issued the Ocall
+ * @msg_arg:      Reference to optee msg used at initial call
+ * @msg_entry:    Reference to optee msg allocation entry
+ * @msg_offs:     Reference to optee msg allocation offset
+ */
+struct tee_session_ocall {
+	u32 thread_p1;
+	struct optee_call_waiter call_waiter;
+	struct tee_ioctl_invoke_arg call_arg;
+	struct optee_msg_arg *msg_arg;
+	struct optee_shm_arg_entry *msg_entry;
+	u_int msg_offs;
+};
+
+/**
+ * struct tee_session - Session between a client and a TEE service (TA)
+ * @list_node: User list for the session
+ * @session_id:        Session identifier provided by the TEE
+ * @ocall_ctx:         OCall context
+ */
 struct optee_session {
 	struct list_head list_node;
 	u32 session_id;
+	struct tee_session_ocall ocall_ctx;
 };
 
 struct optee_context_data {
@@ -255,6 +302,11 @@ int optee_close_session(struct tee_context *ctx, u32 session);
 int optee_invoke_func(struct tee_context *ctx, struct tee_ioctl_invoke_arg *arg,
 		      struct tee_param *param);
 int optee_cancel_req(struct tee_context *ctx, u32 cancel_id, u32 session);
+
+int optee_invoke_func_helper(struct tee_context *ctx,
+			     struct tee_ioctl_invoke_arg *arg,
+			     struct tee_param *param,
+			     struct tee_ocall2_arg *ocall_arg);
 
 #define PTA_CMD_GET_DEVICES		0x0
 #define PTA_CMD_GET_DEVICES_SUPP	0x1

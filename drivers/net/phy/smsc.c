@@ -110,6 +110,28 @@ irqreturn_t smsc_phy_handle_interrupt(struct phy_device *phydev)
 		return IRQ_NONE;
 	}
 
+	/* Handle WoL events */
+	if (irq_status & MII_LAN874X_ISF_INT8) {
+		int rc = phy_read_mmd(phydev, MDIO_MMD_PCS, MII_LAN874X_PHY_MMD_WOL_WUCSR);
+
+		if (rc < 0) {
+			phy_error(phydev);
+			return IRQ_NONE;
+		}
+
+		if (!(rc & MII_LAN874X_PHY_WOL_STATUS_MASK)) {
+			phy_error(phydev);
+			return IRQ_NONE;
+		}
+
+		rc = phy_write_mmd(phydev, MDIO_MMD_PCS, MII_LAN874X_PHY_MMD_WOL_WUCSR,
+				   rc | MII_LAN874X_PHY_WOL_STATUS_MASK);
+		if (rc < 0) {
+			phy_error(phydev);
+			return IRQ_NONE;
+		}
+	}
+
 	if (!(irq_status & MII_LAN83C185_ISF_INT_PHYLIB_EVENTS))
 		return IRQ_NONE;
 
@@ -155,29 +177,10 @@ static int smsc_phy_reset(struct phy_device *phydev)
 
 static int lan87xx_config_aneg(struct phy_device *phydev)
 {
-	u8 mdix_ctrl;
-	int val;
 	int rc;
+	int val;
 
-	/* When auto-negotiation is disabled (forced mode), the PHY's
-	 * Auto-MDIX will continue toggling the TX/RX pairs.
-	 *
-	 * To establish a stable link, we must select a fixed MDI mode.
-	 * If the user has not specified a fixed MDI mode (i.e., mdix_ctrl is
-	 * 'auto'), we default to ETH_TP_MDI. This choice of a ETH_TP_MDI mode
-	 * mirrors the behavior the hardware would exhibit if the AUTOMDIX_EN
-	 * strap were configured for a fixed MDI connection.
-	 */
-	if (phydev->autoneg == AUTONEG_DISABLE) {
-		if (phydev->mdix_ctrl == ETH_TP_MDI_AUTO)
-			mdix_ctrl = ETH_TP_MDI;
-		else
-			mdix_ctrl = phydev->mdix_ctrl;
-	} else {
-		mdix_ctrl = phydev->mdix_ctrl;
-	}
-
-	switch (mdix_ctrl) {
+	switch (phydev->mdix_ctrl) {
 	case ETH_TP_MDI:
 		val = SPECIAL_CTRL_STS_OVRRD_AMDIX_;
 		break;
@@ -186,8 +189,7 @@ static int lan87xx_config_aneg(struct phy_device *phydev)
 			SPECIAL_CTRL_STS_AMDIX_STATE_;
 		break;
 	case ETH_TP_MDI_AUTO:
-		val = SPECIAL_CTRL_STS_OVRRD_AMDIX_ |
-			SPECIAL_CTRL_STS_AMDIX_ENABLE_;
+		val = SPECIAL_CTRL_STS_AMDIX_ENABLE_;
 		break;
 	default:
 		return genphy_config_aneg(phydev);
@@ -203,7 +205,7 @@ static int lan87xx_config_aneg(struct phy_device *phydev)
 	rc |= val;
 	phy_write(phydev, SPECIAL_CTRL_STS, rc);
 
-	phydev->mdix = mdix_ctrl;
+	phydev->mdix = phydev->mdix_ctrl;
 	return genphy_config_aneg(phydev);
 }
 
@@ -280,33 +282,6 @@ int lan87xx_read_status(struct phy_device *phydev)
 	return err;
 }
 EXPORT_SYMBOL_GPL(lan87xx_read_status);
-
-static int lan87xx_phy_config_init(struct phy_device *phydev)
-{
-	int rc;
-
-	/* The LAN87xx PHY's initial MDI-X mode is determined by the AUTOMDIX_EN
-	 * hardware strap, but the driver cannot read the strap's status. This
-	 * creates an unpredictable initial state.
-	 *
-	 * To ensure consistent and reliable behavior across all boards,
-	 * override the strap configuration on initialization and force the PHY
-	 * into a known state with Auto-MDIX enabled, which is the expected
-	 * default for modern hardware.
-	 */
-	rc = phy_modify(phydev, SPECIAL_CTRL_STS,
-			SPECIAL_CTRL_STS_OVRRD_AMDIX_ |
-			SPECIAL_CTRL_STS_AMDIX_ENABLE_ |
-			SPECIAL_CTRL_STS_AMDIX_STATE_,
-			SPECIAL_CTRL_STS_OVRRD_AMDIX_ |
-			SPECIAL_CTRL_STS_AMDIX_ENABLE_);
-	if (rc < 0)
-		return rc;
-
-	phydev->mdix_ctrl = ETH_TP_MDI_AUTO;
-
-	return smsc_phy_config_init(phydev);
-}
 
 static int lan874x_phy_config_init(struct phy_device *phydev)
 {
@@ -537,12 +512,32 @@ static int lan874x_set_wol(struct phy_device *phydev,
 		}
 	}
 
-	rc = phy_write_mmd(phydev, MDIO_MMD_PCS, MII_LAN874X_PHY_MMD_WOL_WUCSR,
-			   val_wucsr);
+	rc = phy_write_mmd(phydev, MDIO_MMD_PCS, MII_LAN874X_PHY_MMD_WOL_WUCSR, val_wucsr);
 	if (rc < 0)
 		return rc;
 
 	return 0;
+}
+
+static int smsc_phy_resume(struct phy_device *phydev)
+{
+	int rc;
+
+	if (!phydev->wol_enabled)
+		return genphy_resume(phydev);
+
+	rc = phy_read_mmd(phydev, MDIO_MMD_PCS, MII_LAN874X_PHY_MMD_WOL_WUCSR);
+	if (rc < 0)
+		return rc;
+
+	if (!(rc & MII_LAN874X_PHY_WOL_STATUS_MASK))
+		return 0;
+
+	dev_info(&phydev->mdio.dev, "Woke up from LAN event.\n");
+	rc = phy_write_mmd(phydev, MDIO_MMD_PCS, MII_LAN874X_PHY_MMD_WOL_WUCSR,
+			   rc | MII_LAN874X_PHY_WOL_STATUS_MASK);
+
+	return rc;
 }
 
 static int smsc_get_sset_count(struct phy_device *phydev)
@@ -675,6 +670,9 @@ int smsc_phy_probe(struct phy_device *phydev)
 
 	phydev->priv = priv;
 
+	if (phydev->drv->set_wol)
+		device_set_wakeup_capable(&phydev->mdio.dev, true);
+
 	/* Make clk optional to keep DTB backward compatibility. */
 	refclk = devm_clk_get_optional_enabled(dev, NULL);
 	if (IS_ERR(refclk))
@@ -743,7 +741,7 @@ static struct phy_driver smsc_phy_driver[] = {
 
 	/* basic functions */
 	.read_status	= lan87xx_read_status,
-	.config_init	= lan87xx_phy_config_init,
+	.config_init	= smsc_phy_config_init,
 	.soft_reset	= smsc_phy_reset,
 	.config_aneg	= lan87xx_config_aneg,
 
@@ -878,7 +876,7 @@ static struct phy_driver smsc_phy_driver[] = {
 	.get_wol	= lan874x_get_wol,
 
 	.suspend	= genphy_suspend,
-	.resume		= genphy_resume,
+	.resume		= smsc_phy_resume,
 } };
 
 module_phy_driver(smsc_phy_driver);

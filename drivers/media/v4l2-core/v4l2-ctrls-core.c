@@ -367,7 +367,9 @@ void v4l2_ctrl_type_op_log(const struct v4l2_ctrl *ctrl)
 	case V4L2_CTRL_TYPE_AV1_FILM_GRAIN:
 		pr_cont("AV1_FILM_GRAIN");
 		break;
-
+	case V4L2_CTRL_TYPE_ISP_STAT_REGION:
+		pr_cont("ISP_STAT_REGION");
+		break;
 	default:
 		pr_cont("unknown type %d", ctrl->type);
 		break;
@@ -790,6 +792,48 @@ static int validate_av1_sequence(struct v4l2_ctrl_av1_sequence *s)
 	return 0;
 }
 
+static int
+validate_h264_encode_params(struct v4l2_ctrl_h264_encode_params *encode_params)
+{
+	/* Make sure we're not passed invalid flags. */
+	if (encode_params->flags & ~(V4L2_H264_ENCODE_FLAG_ENTROPY_CABAC |
+		V4L2_H264_ENCODE_FLAG_TRANSFORM_8X8_MODE |
+		V4L2_H264_ENCODE_FLAG_CONSTRAINED_INTRA_PRED |
+		V4L2_H264_ENCODE_FLAG_MARK_LONGTERM))
+		return -EINVAL;
+
+	if (encode_params->slice_type != V4L2_H264_SLICE_TYPE_I &&
+	    encode_params->slice_type != V4L2_H264_SLICE_TYPE_P &&
+	    encode_params->slice_type != V4L2_H264_SLICE_TYPE_B &&
+	    encode_params->slice_type != V4L2_H264_SLICE_TYPE_SI &&
+		encode_params->slice_type != V4L2_H264_SLICE_TYPE_SP)
+		return -EINVAL;
+
+	if (encode_params->cabac_init_idc > 2)
+		return -EINVAL;
+
+	if (encode_params->nalu_type != V4L2_H264_NAL_CODED_SLICE_NON_IDR_PIC &&
+	    encode_params->nalu_type != V4L2_H264_NAL_CODED_SLICE_IDR_PIC)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int
+validate_h264_encode_rc(struct v4l2_ctrl_h264_encode_rc *encode_rc)
+{
+	if (encode_rc->qp > 51)
+		return -EINVAL;
+
+	if (encode_rc->qp_min > 51 || encode_rc->qp_max > 51)
+		return -EINVAL;
+
+	if (encode_rc->qp_min > encode_rc->qp_max)
+		return -EINVAL;
+
+	return 0;
+}
+
 /*
  * Compound controls validation requires setting unused fields/flags to zero
  * in order to properly detect unchanged controls with v4l2_ctrl_type_op_equal's
@@ -811,6 +855,7 @@ static int std_validate_compound(const struct v4l2_ctrl *ctrl, u32 idx,
 	struct v4l2_ctrl_hevc_pps *p_hevc_pps;
 	struct v4l2_ctrl_hdr10_mastering_display *p_hdr10_mastering;
 	struct v4l2_ctrl_hevc_decode_params *p_hevc_decode_params;
+	struct v4l2_ctrl_vp8_encode_params *p_vp8_encode_params;
 	struct v4l2_area *area;
 	void *p = ptr.p + idx * ctrl->elem_size;
 	unsigned int i;
@@ -1047,6 +1092,15 @@ static int std_validate_compound(const struct v4l2_ctrl *ctrl, u32 idx,
 		zero_padding(p_vp8_frame->coder_state);
 		break;
 
+	case V4L2_CTRL_TYPE_VP8_ENCODE_PARAMS:
+		p_vp8_encode_params = p;
+		if (p_vp8_encode_params->loop_filter_level > 63)
+			return -EINVAL;
+
+		if (p_vp8_encode_params->sharpness_level > 7)
+			return -EINVAL;
+		break;
+
 	case V4L2_CTRL_TYPE_HEVC_SPS:
 		p_hevc_sps = p;
 
@@ -1168,6 +1222,14 @@ static int std_validate_compound(const struct v4l2_ctrl *ctrl, u32 idx,
 		if (!area->width || !area->height)
 			return -EINVAL;
 		break;
+	case V4L2_CTRL_TYPE_ISP_STAT_REGION:
+		break;
+
+	case V4L2_CTRL_TYPE_H264_ENCODE_PARAMS:
+		return validate_h264_encode_params(p);
+
+	case V4L2_CTRL_TYPE_H264_ENCODE_RC:
+		return validate_h264_encode_rc(p);
 
 	default:
 		return -EINVAL;
@@ -1864,8 +1926,20 @@ static struct v4l2_ctrl *v4l2_ctrl_new(struct v4l2_ctrl_handler *hdl,
 	case V4L2_CTRL_TYPE_AV1_FILM_GRAIN:
 		elem_size = sizeof(struct v4l2_ctrl_av1_film_grain);
 		break;
+	case V4L2_CTRL_TYPE_ISP_STAT_REGION:
+		elem_size = sizeof(struct v4l2_ctrl_isp_stat_region);
+		break;
 	case V4L2_CTRL_TYPE_AREA:
 		elem_size = sizeof(struct v4l2_area);
+		break;
+	case V4L2_CTRL_TYPE_VP8_ENCODE_PARAMS:
+		elem_size = sizeof(struct v4l2_ctrl_vp8_encode_params);
+		break;
+	case V4L2_CTRL_TYPE_H264_ENCODE_PARAMS:
+		elem_size = sizeof(struct v4l2_ctrl_h264_encode_params);
+		break;
+	case V4L2_CTRL_TYPE_H264_ENCODE_RC:
+		elem_size = sizeof(struct v4l2_ctrl_h264_encode_rc);
 		break;
 	default:
 		if (type < V4L2_CTRL_COMPOUND_TYPES)

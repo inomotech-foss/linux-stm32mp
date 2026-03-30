@@ -55,6 +55,10 @@ properties:
     description: number of clock cells for ck_usbo_48m consumer
     const: 0
 
+  access-controllers:
+    minItems: 1
+    maxItems: 2
+
 # Required child nodes:
 
 patternProperties:
@@ -73,6 +77,10 @@ patternProperties:
 
       "#phy-cells":
         enum: [ 0x0, 0x1 ]
+
+      interrupts:
+        maxItems: 1
+        description: interrupt used for wakeup when port is used by USBH controller
 
       connector:
         type: object

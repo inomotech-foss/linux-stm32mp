@@ -109,13 +109,16 @@ static inline struct otm8009a *panel_to_otm8009a(struct drm_panel *panel)
 	return container_of(panel, struct otm8009a, panel);
 }
 
-static void otm8009a_dcs_write_buf(struct otm8009a *ctx, const void *data,
-				   size_t len)
+static int otm8009a_dcs_write_buf(struct otm8009a *ctx, const void *data, size_t len)
 {
 	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
+	int ret = 0;
 
-	if (mipi_dsi_dcs_write_buffer(dsi, data, len) < 0)
+	ret = mipi_dsi_dcs_write_buffer(dsi, data, len);
+	if (ret < 0)
 		dev_warn(ctx->dev, "mipi dsi dcs write buffer failed\n");
+
+	return ret;
 }
 
 #define dcs_write_seq(ctx, seq...)			\
@@ -380,6 +383,8 @@ static int otm8009a_get_modes(struct drm_panel *panel,
 
 	connector->display_info.width_mm = mode->width_mm;
 	connector->display_info.height_mm = mode->height_mm;
+	connector->display_info.bus_flags = DRM_BUS_FLAG_DE_HIGH |
+					    DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE;
 
 	return num_modes;
 }
@@ -400,10 +405,11 @@ static int otm8009a_backlight_update_status(struct backlight_device *bd)
 {
 	struct otm8009a *ctx = bl_get_data(bd);
 	u8 data[2];
+	int ret = 0;
 
 	if (!ctx->prepared) {
 		dev_dbg(&bd->dev, "lcd not ready yet for setting its backlight!\n");
-		return -ENXIO;
+		return ret;
 	}
 
 	if (bd->props.power <= FB_BLANK_NORMAL) {
@@ -413,7 +419,9 @@ static int otm8009a_backlight_update_status(struct backlight_device *bd)
 		 */
 		data[0] = MIPI_DCS_SET_DISPLAY_BRIGHTNESS;
 		data[1] = bd->props.brightness;
-		otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+		ret = otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+		if (ret < 0)
+			return ret;
 
 		/* set Brightness Control & Backlight on */
 		data[1] = 0x24;
@@ -425,7 +433,9 @@ static int otm8009a_backlight_update_status(struct backlight_device *bd)
 
 	/* Update Brightness Control & Backlight */
 	data[0] = MIPI_DCS_WRITE_CONTROL_DISPLAY;
-	otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+	ret = otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
@@ -444,19 +454,23 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(ctx->reset_gpio)) {
-		dev_err(dev, "cannot get reset-gpio\n");
-		return PTR_ERR(ctx->reset_gpio);
+	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_ASIS);
+	if (IS_ERR(ctx->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
+				     "cannot get reset GPIO\n");
+
+	if (ctx->reset_gpio) {
+		ret = gpiod_get_direction(ctx->reset_gpio);
+		if (ret != 0)
+			gpiod_direction_output(ctx->reset_gpio, 1);
+		else
+			gpiod_direction_output(ctx->reset_gpio, 0);
 	}
 
 	ctx->supply = devm_regulator_get(dev, "power");
-	if (IS_ERR(ctx->supply)) {
-		ret = PTR_ERR(ctx->supply);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to request regulator: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(ctx->supply))
+		return dev_err_probe(dev, PTR_ERR(ctx->supply),
+				     "cannot get regulator\n");
 
 	mipi_dsi_set_drvdata(dsi, ctx);
 
@@ -465,7 +479,8 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	dsi->lanes = 2;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
-			  MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS;
+			  MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS |
+			  MIPI_DSI_MODE_NO_EOT_PACKET;
 
 	drm_panel_init(&ctx->panel, dev, &otm8009a_drm_funcs,
 		       DRM_MODE_CONNECTOR_DSI);

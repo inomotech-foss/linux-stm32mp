@@ -332,8 +332,9 @@ static int hantro_try_fmt(const struct hantro_ctx *ctx,
 
 	pix_mp->field = V4L2_FIELD_NONE;
 
-	v4l2_apply_frmsize_constraints(&pix_mp->width, &pix_mp->height,
-				       &vpu_fmt->frmsize);
+	if (!capture || !ctx->is_encoder)
+		v4l2_apply_frmsize_constraints(&pix_mp->width, &pix_mp->height,
+					       &vpu_fmt->frmsize);
 
 	if (!coded) {
 		/* Fill remaining fields */
@@ -654,8 +655,14 @@ static int vidioc_g_selection(struct file *file, void *priv,
 {
 	struct hantro_ctx *ctx = fh_to_ctx(priv);
 
-	/* Crop only supported on source. */
-	if (sel->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
+	/* Crop only supported on encoder source. */
+	if (ctx->is_encoder &&
+	    sel->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
+		return -EINVAL;
+
+	/* Compose only supported on decoder destination. */
+	if (!ctx->is_encoder &&
+	    sel->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
 	switch (sel->target) {
@@ -671,6 +678,15 @@ static int vidioc_g_selection(struct file *file, void *priv,
 		sel->r.left = 0;
 		sel->r.width = ctx->dst_fmt.width;
 		sel->r.height = ctx->dst_fmt.height;
+		break;
+	case V4L2_SEL_TGT_COMPOSE:
+	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
+	case V4L2_SEL_TGT_COMPOSE_BOUNDS:
+		/* Returns the visible region of video within the MB aligned frame */
+		sel->r.top = 0;
+		sel->r.left = 0;
+		sel->r.width = ctx->src_fmt.width;
+		sel->r.height = ctx->src_fmt.height;
 		break;
 	default:
 		return -EINVAL;
@@ -753,6 +769,44 @@ static int vidioc_encoder_cmd(struct file *file, void *priv,
 	return 0;
 }
 
+static int vidioc_try_decoder_cmd(struct file *file, void *priv,
+				  struct v4l2_decoder_cmd *dc)
+{
+	struct hantro_ctx *ctx = fh_to_ctx(priv);
+
+	if (ctx->vpu_src_fmt->codec_mode != HANTRO_MODE_JPEG_DEC)
+		return v4l2_m2m_ioctl_stateless_try_decoder_cmd(file, priv, dc);
+
+	return v4l2_m2m_ioctl_try_decoder_cmd(file, priv, dc);
+}
+
+static int vidioc_decoder_cmd(struct file *file, void *priv,
+			      struct v4l2_decoder_cmd *dc)
+{
+	struct hantro_ctx *ctx = fh_to_ctx(priv);
+	int ret;
+
+	if (ctx->vpu_src_fmt->codec_mode != HANTRO_MODE_JPEG_DEC)
+		return v4l2_m2m_ioctl_stateless_decoder_cmd(file, priv, dc);
+
+	ret = v4l2_m2m_ioctl_try_decoder_cmd(file, priv, dc);
+	if (ret < 0)
+		return ret;
+
+	if (!vb2_is_streaming(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx)))
+		return 0;
+
+	ret = v4l2_m2m_ioctl_decoder_cmd(file, priv, dc);
+	if (ret < 0)
+		return ret;
+
+	if (dc->cmd == V4L2_DEC_CMD_STOP &&
+	    v4l2_m2m_has_stopped(ctx->fh.m2m_ctx))
+		v4l2_event_queue_fh(&ctx->fh, &hantro_eos_event);
+
+	return 0;
+}
+
 const struct v4l2_ioctl_ops hantro_ioctl_ops = {
 	.vidioc_querycap = vidioc_querycap,
 	.vidioc_enum_framesizes = vidioc_enum_framesizes,
@@ -783,8 +837,8 @@ const struct v4l2_ioctl_ops hantro_ioctl_ops = {
 	.vidioc_g_selection = vidioc_g_selection,
 	.vidioc_s_selection = vidioc_s_selection,
 
-	.vidioc_decoder_cmd = v4l2_m2m_ioctl_stateless_decoder_cmd,
-	.vidioc_try_decoder_cmd = v4l2_m2m_ioctl_stateless_try_decoder_cmd,
+	.vidioc_try_decoder_cmd = vidioc_try_decoder_cmd,
+	.vidioc_decoder_cmd = vidioc_decoder_cmd,
 
 	.vidioc_try_encoder_cmd = v4l2_m2m_ioctl_try_encoder_cmd,
 	.vidioc_encoder_cmd = vidioc_encoder_cmd,

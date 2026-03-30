@@ -23,6 +23,25 @@ config REMOTEPROC_CDEV
 
 	  It's safe to say N if you don't want to use this interface.
 
+config REMOTEPROC_SRM_CORE
+	tristate "Remoteproc System Resource Manager core"
+	depends on RPMSG
+	help
+	  Say y here to enable the core driver of the remoteproc System Resource
+	  Manager (SRM).
+	  The SRM handles resources allocated to remote processors.
+	  The core part is in charge of controlling the device children.
+
+config REMOTEPROC_SRM_DEV
+	tristate "Remoteproc System Resource Manager device"
+	depends on REMOTEPROC_SRM_CORE
+	help
+	  Say y here to enable the device driver of the remoteproc System
+	  Resource Manager (SRM).
+	  The SRM handles resources allocated to remote processors.
+	  The device part is in charge of reserving and initializing resources
+	  for a peripheral assigned to a coprocessor.
+
 config IMX_REMOTEPROC
 	tristate "i.MX remoteproc support"
 	depends on ARCH_MXC
@@ -326,6 +345,21 @@ config STM32_RPROC
 
 	  This can be either built-in or a loadable module.
 
+config STM32_M0_RPROC
+	tristate "STM32 remoteproc support for CM0+"
+	depends on ARCH_STM32 || COMPILE_TEST
+	depends on REMOTEPROC
+	select MAILBOX
+	help
+	  Say y here to support STM32 MCU CM0+ processors via the
+	  remote processor framework.
+
+	  You want to say y here in order to enable Low Power
+	  use-cases to run on your platform (dedicated firmware could be
+	  offloaded to remote MCU M0+ processors using this framework).
+
+	  This can be either built-in or a loadable module.
+
 config TI_K3_DSP_REMOTEPROC
 	tristate "TI K3 DSP remoteproc support"
 	depends on ARCH_K3
@@ -364,6 +398,15 @@ config XLNX_R5_REMOTEPROC
 	  processor framework.
 
 	  It's safe to say N if not interested in using RPU r5f cores.
+
+
+config TEE_REMOTEPROC
+	tristate "trusted firmware support by a TEE application"
+	depends on OPTEE
+	help
+	  Support for trusted remote processors firmware. The firmware
+	  authentication and/or decryption are managed by a trusted application.
+	  This can be either built-in or a loadable module.
 
 endif # REMOTEPROC
 

@@ -13,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_irq.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/reset.h>
@@ -137,6 +138,7 @@ struct stm32_usbphyc_phy {
 	struct phy *phy;
 	struct stm32_usbphyc *usbphyc;
 	struct regulator *vbus;
+	int wakeirq;
 	u32 index;
 	bool active;
 	u32 tune;
@@ -151,6 +153,7 @@ struct stm32_usbphyc {
 	int nphys;
 	struct regulator *vdda1v1;
 	struct regulator *vdda1v8;
+	struct regulator *vdd3v3;
 	atomic_t n_pll_cons;
 	struct clk_hw clk48_hw;
 	int switch_setup;
@@ -178,8 +181,14 @@ static int stm32_usbphyc_regulators_enable(struct stm32_usbphyc *usbphyc)
 	if (ret)
 		goto vdda1v1_disable;
 
+	ret = regulator_enable(usbphyc->vdd3v3);
+	if (ret)
+		goto vdda1v8_disable;
+
 	return 0;
 
+vdda1v8_disable:
+	regulator_disable(usbphyc->vdda1v8);
 vdda1v1_disable:
 	regulator_disable(usbphyc->vdda1v1);
 
@@ -189,6 +198,10 @@ vdda1v1_disable:
 static int stm32_usbphyc_regulators_disable(struct stm32_usbphyc *usbphyc)
 {
 	int ret;
+
+	ret = regulator_disable(usbphyc->vdd3v3);
+	if (ret)
+		return ret;
 
 	ret = regulator_disable(usbphyc->vdda1v8);
 	if (ret)
@@ -380,6 +393,12 @@ static int stm32_usbphyc_phy_exit(struct phy *phy)
 static int stm32_usbphyc_phy_power_on(struct phy *phy)
 {
 	struct stm32_usbphyc_phy *usbphyc_phy = phy_get_drvdata(phy);
+	struct stm32_usbphyc *usbphyc = usbphyc_phy->usbphyc;
+
+	if (usbphyc_phy->wakeirq > 0)
+		if (enable_irq_wake(usbphyc_phy->wakeirq))
+			dev_warn(usbphyc->dev,
+				 "Wake irq for phy%d not enabled\n", usbphyc_phy->index);
 
 	if (usbphyc_phy->vbus)
 		return regulator_enable(usbphyc_phy->vbus);
@@ -390,6 +409,12 @@ static int stm32_usbphyc_phy_power_on(struct phy *phy)
 static int stm32_usbphyc_phy_power_off(struct phy *phy)
 {
 	struct stm32_usbphyc_phy *usbphyc_phy = phy_get_drvdata(phy);
+	struct stm32_usbphyc *usbphyc = usbphyc_phy->usbphyc;
+
+	if (usbphyc_phy->wakeirq > 0)
+		if (disable_irq_wake(usbphyc_phy->wakeirq))
+			dev_warn(usbphyc->dev,
+				 "Wake irq for phy%d not disabled\n", usbphyc_phy->index);
 
 	if (usbphyc_phy->vbus)
 		return regulator_disable(usbphyc_phy->vbus);
@@ -690,6 +715,13 @@ static int stm32_usbphyc_probe(struct platform_device *pdev)
 		goto clk_disable;
 	}
 
+	usbphyc->vdd3v3 = devm_regulator_get(dev, "phy");
+	if (IS_ERR(usbphyc->vdd3v3)) {
+		ret = dev_err_probe(dev, PTR_ERR(usbphyc->vdd3v3),
+				    "failed to get phy supply\n");
+		goto clk_disable;
+	}
+
 	for_each_child_of_node(np, child) {
 		struct stm32_usbphyc_phy *usbphyc_phy;
 		struct phy *phy;
@@ -735,6 +767,12 @@ static int stm32_usbphyc_probe(struct platform_device *pdev)
 				goto put_child;
 			usbphyc->phys[port]->vbus = NULL;
 		}
+
+		/* Get optional wakeup interrupt */
+		ret = of_irq_get(child, 0);
+		if (ret == -EPROBE_DEFER)
+			goto put_child;
+		usbphyc->phys[port]->wakeirq = ret;
 
 		/* Configure phy tuning */
 		stm32_usbphyc_phy_tuning(usbphyc, child, index);

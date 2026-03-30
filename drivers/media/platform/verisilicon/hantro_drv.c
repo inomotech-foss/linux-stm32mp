@@ -161,7 +161,6 @@ void hantro_end_prepare_run(struct hantro_ctx *ctx)
 	src_buf = hantro_get_src_buf(ctx);
 	v4l2_ctrl_request_complete(src_buf->vb2_buf.req_obj.req,
 				   &ctx->ctrl_handler);
-
 	/* Kick the watchdog. */
 	schedule_delayed_work(&ctx->dev->watchdog_work,
 			      msecs_to_jiffies(2000));
@@ -185,6 +184,9 @@ static void device_run(void *priv)
 		goto err_cancel_job;
 
 	v4l2_m2m_buf_copy_metadata(src, dst, true);
+
+	if (ctx->codec_ops->reset)
+		ctx->codec_ops->reset(ctx);
 
 	if (ctx->codec_ops->run(ctx))
 		goto err_cancel_job;
@@ -218,6 +220,13 @@ queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_vq)
 	 */
 	src_vq->dma_attrs = DMA_ATTR_ALLOC_SINGLE_PAGES |
 			    DMA_ATTR_NO_KERNEL_MAPPING;
+	/*
+	 * The Kernel needs access to the JPEG source buffer for the
+	 * JPEG decoder to parse the JPEG headers.
+	 */
+	if (!ctx->is_encoder)
+		src_vq->dma_attrs &= ~DMA_ATTR_NO_KERNEL_MAPPING;
+
 	src_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	src_vq->lock = &ctx->dev->vpu_mutex;
@@ -281,6 +290,37 @@ static int hantro_try_ctrl(struct v4l2_ctrl *ctrl)
 
 		if (sequence->bit_depth != 8 && sequence->bit_depth != 10)
 			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int hantro_enc_try_ctrl(struct v4l2_ctrl *ctrl)
+{
+	if (ctrl->id == V4L2_CID_ROTATE) {
+		/* Only 90 and 270 degrees rotation are supported */
+		if (ctrl->val != 0 && ctrl->val != 90 && ctrl->val != 270)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int hantro_enc_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct hantro_ctx *ctx;
+
+	ctx = container_of(ctrl->handler,
+			   struct hantro_ctx, ctrl_handler);
+
+	vpu_debug(1, "s_ctrl: id = %d, val = %d\n", ctrl->id, ctrl->val);
+
+	switch (ctrl->id) {
+	case V4L2_CID_ROTATE:
+		ctx->rotation = ctrl->val;
+		break;
+	default:
+		return -EINVAL;
 	}
 
 	return 0;
@@ -387,6 +427,11 @@ static const struct v4l2_ctrl_ops hantro_ctrl_ops = {
 	.try_ctrl = hantro_try_ctrl,
 };
 
+static const struct v4l2_ctrl_ops hantro_enc_ctrl_ops = {
+	.try_ctrl = hantro_enc_try_ctrl,
+	.s_ctrl = hantro_enc_s_ctrl,
+};
+
 static const struct v4l2_ctrl_ops hantro_jpeg_ctrl_ops = {
 	.s_ctrl = hantro_jpeg_s_ctrl,
 };
@@ -441,6 +486,30 @@ static const struct hantro_ctrl controls[] = {
 		.codec = HANTRO_MPEG2_DECODER,
 		.cfg = {
 			.id = V4L2_CID_STATELESS_MPEG2_SEQUENCE,
+		},
+	}, {
+		.codec = HANTRO_VP8_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_VP8_ENCODE_PARAMS,
+		},
+	}, {
+		.codec = HANTRO_VP8_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_VP8_ENCODE_QP,
+			.min = 0,
+			.max = 127,
+			.step = 1,
+			.def = 0,
+		},
+	}, {
+		.codec = HANTRO_H264_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_H264_ENCODE_PARAMS,
+		},
+	}, {
+		.codec = HANTRO_H264_ENCODER,
+		.cfg = {
+			.id = V4L2_CID_STATELESS_H264_ENCODE_RC,
 		},
 	}, {
 		.codec = HANTRO_MPEG2_DECODER,
@@ -598,7 +667,11 @@ static int hantro_ctrls_setup(struct hantro_dev *vpu,
 {
 	int i, num_ctrls = ARRAY_SIZE(controls);
 
-	v4l2_ctrl_handler_init(&ctx->ctrl_handler, num_ctrls);
+	v4l2_ctrl_handler_init(&ctx->ctrl_handler, 1 + num_ctrls);
+
+	if (ctx->is_encoder)
+		v4l2_ctrl_new_std(&ctx->ctrl_handler, &hantro_enc_ctrl_ops,
+				  V4L2_CID_ROTATE, 0, 270, 90, 0);
 
 	for (i = 0; i < num_ctrls; i++) {
 		if (!(allowed_codecs & controls[i].codec))
@@ -733,6 +806,10 @@ static const struct of_device_id of_hantro_match[] = {
 #endif
 #ifdef CONFIG_VIDEO_HANTRO_SUNXI
 	{ .compatible = "allwinner,sun50i-h6-vpu-g2", .data = &sunxi_vpu_variant, },
+#endif
+#ifdef CONFIG_VIDEO_HANTRO_STM32MP25
+	{ .compatible = "st,stm32mp25-vdec", .data = &stm32mp25_vdec_variant, },
+	{ .compatible = "st,stm32mp25-venc", .data = &stm32mp25_venc_variant, },
 #endif
 	{ /* sentinel */ }
 };
@@ -899,8 +976,9 @@ static int hantro_add_func(struct hantro_dev *vpu, unsigned int funcid)
 	vfd->vfl_dir = VFL_DIR_M2M;
 	vfd->device_caps = V4L2_CAP_STREAMING | V4L2_CAP_VIDEO_M2M_MPLANE;
 	vfd->ioctl_ops = &hantro_ioctl_ops;
-	snprintf(vfd->name, sizeof(vfd->name), "%s-%s", match->compatible,
-		 funcid == MEDIA_ENT_F_PROC_VIDEO_ENCODER ? "enc" : "dec");
+	strscpy(vfd->name, match->compatible, sizeof(vfd->name));
+	strlcat(vfd->name, funcid == MEDIA_ENT_F_PROC_VIDEO_ENCODER ?
+		"-enc" : "-dec", sizeof(vfd->name));
 
 	if (funcid == MEDIA_ENT_F_PROC_VIDEO_ENCODER) {
 		vpu->encoder = func;
@@ -910,7 +988,6 @@ static int hantro_add_func(struct hantro_dev *vpu, unsigned int funcid)
 		vpu->decoder = func;
 		v4l2_disable_ioctl(vfd, VIDIOC_TRY_ENCODER_CMD);
 		v4l2_disable_ioctl(vfd, VIDIOC_ENCODER_CMD);
-		v4l2_disable_ioctl(vfd, VIDIOC_G_SELECTION);
 		v4l2_disable_ioctl(vfd, VIDIOC_S_SELECTION);
 	}
 

@@ -50,7 +50,8 @@ struct scmi_clock_info {
 	union {
 		struct {
 			int num_rates;
-			u64 rates[SCMI_MAX_NUM_RATES];
+			u64 min_rate;
+			u64 max_rate;
 		} list;
 		struct {
 			u64 min_rate;
@@ -70,6 +71,13 @@ struct scmi_handle;
 struct scmi_device;
 struct scmi_protocol_handle;
 
+enum scmi_clock_oem_config {
+	SCMI_CLOCK_CFG_DUTY_CYCLE = 0x1,
+	SCMI_CLOCK_CFG_PHASE,
+	SCMI_CLOCK_CFG_OEM_START = 0x80,
+	SCMI_CLOCK_CFG_OEM_END = 0xFF,
+};
+
 /**
  * struct scmi_clk_proto_ops - represents the various operations provided
  *	by SCMI Clock Protocol
@@ -80,6 +88,12 @@ struct scmi_protocol_handle;
  * @rate_set: set the clock rate of a clock
  * @enable: enables the specified clock
  * @disable: disables the specified clock
+ * @enable_atomic: Atomic clock enable request
+ * @disable_atomic: Atomic clock disable request
+ * @get_duty_cycle: Get clock dury cycle as numerator/denominator
+ * @round_rate_get: Get the nearst rate clock can support. This handler
+ * is needed only for discrete rates clocks, pincremental clock already
+ * provide min/max/step value to compute the supported rounded rate.
  */
 struct scmi_clk_proto_ops {
 	int (*count_get)(const struct scmi_protocol_handle *ph);
@@ -95,6 +109,10 @@ struct scmi_clk_proto_ops {
 	int (*enable_atomic)(const struct scmi_protocol_handle *ph, u32 clk_id);
 	int (*disable_atomic)(const struct scmi_protocol_handle *ph,
 			      u32 clk_id);
+	int (*get_duty_cycle)(const struct scmi_protocol_handle *ph,
+			      u32 clk_id, int *num, int *den);
+	int (*round_rate_get)(const struct scmi_protocol_handle *ph,
+			      u32 clk_id, u64 *rate);
 };
 
 struct scmi_perf_domain_info {
@@ -112,7 +130,6 @@ struct scmi_perf_domain_info {
  * @limits_get: gets limits on the performance level of a domain
  * @level_set: sets the performance level of a domain
  * @level_get: gets the performance level of a domain
- * @device_domain_id: gets the scmi domain id for a given device
  * @transition_latency_get: gets the DVFS transition latency for a given device
  * @device_opps_add: adds all the OPPs for a given device
  * @freq_set: sets the frequency for a given device using sustained frequency
@@ -138,11 +155,10 @@ struct scmi_perf_proto_ops {
 			 u32 level, bool poll);
 	int (*level_get)(const struct scmi_protocol_handle *ph, u32 domain,
 			 u32 *level, bool poll);
-	int (*device_domain_id)(struct device *dev);
 	int (*transition_latency_get)(const struct scmi_protocol_handle *ph,
-				      struct device *dev);
+				      u32 domain);
 	int (*device_opps_add)(const struct scmi_protocol_handle *ph,
-			       struct device *dev);
+			       struct device *dev, u32 domain);
 	int (*freq_set)(const struct scmi_protocol_handle *ph, u32 domain,
 			unsigned long rate, bool poll);
 	int (*freq_get)(const struct scmi_protocol_handle *ph, u32 domain,
@@ -150,7 +166,7 @@ struct scmi_perf_proto_ops {
 	int (*est_power_get)(const struct scmi_protocol_handle *ph, u32 domain,
 			     unsigned long *rate, unsigned long *power);
 	bool (*fast_switch_possible)(const struct scmi_protocol_handle *ph,
-				     struct device *dev);
+				     u32 domain);
 	enum scmi_power_scale (*power_scale_get)(const struct scmi_protocol_handle *ph);
 };
 

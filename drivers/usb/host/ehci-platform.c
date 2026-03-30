@@ -35,6 +35,7 @@
 #include <linux/usb/hcd.h>
 #include <linux/usb/ehci_pdriver.h>
 #include <linux/usb/of.h>
+#include <linux/pm_wakeirq.h>
 
 #include "ehci.h"
 
@@ -369,11 +370,25 @@ static int ehci_platform_probe(struct platform_device *dev)
 
 	hcd->tpl_support = of_usb_host_tpl_support(dev->dev.of_node);
 
+	err = pm_runtime_set_active(&dev->dev);
+	if (err) {
+		dev_err_probe(&dev->dev, err, "Failed to activate pm runtime\n");
+		goto err_power;
+	}
+
+	err = devm_pm_runtime_enable(&dev->dev);
+	if (err) {
+		dev_err_probe(&dev->dev, err, "Failed to enable pm runtime\n");
+		goto err_power;
+	}
+
 	err = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (err)
 		goto err_power;
 
-	device_wakeup_enable(hcd->self.controller);
+	if (of_property_read_bool(dev->dev.of_node, "wakeup-source"))
+		device_set_wakeup_capable(hcd->self.controller, true);
+
 	device_enable_async_suspend(hcd->self.controller);
 	platform_set_drvdata(dev, hcd);
 
@@ -409,6 +424,9 @@ static void ehci_platform_remove(struct platform_device *dev)
 	if (priv->quirk_poll)
 		quirk_poll_end(priv);
 
+	if (of_property_read_bool(dev->dev.of_node, "wakeup-source"))
+		device_set_wakeup_capable(hcd->self.controller, false);
+
 	usb_remove_hcd(hcd);
 
 	if (pdata->power_off)
@@ -431,7 +449,7 @@ static int __maybe_unused ehci_platform_suspend(struct device *dev)
 	struct usb_ehci_pdata *pdata = dev_get_platdata(dev);
 	struct platform_device *pdev = to_platform_device(dev);
 	struct ehci_platform_priv *priv = hcd_to_ehci_priv(hcd);
-	bool do_wakeup = device_may_wakeup(dev);
+	bool do_wakeup = device_may_wakeup(dev) || device_wakeup_path(dev);
 	int ret;
 
 	if (priv->quirk_poll)
@@ -444,6 +462,9 @@ static int __maybe_unused ehci_platform_suspend(struct device *dev)
 	if (pdata->power_suspend)
 		pdata->power_suspend(pdev);
 
+	if (do_wakeup)
+		enable_irq_wake(hcd->irq);
+
 	return ret;
 }
 
@@ -454,6 +475,9 @@ static int __maybe_unused ehci_platform_resume(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct ehci_platform_priv *priv = hcd_to_ehci_priv(hcd);
 	struct device *companion_dev;
+
+	if (device_may_wakeup(dev) || device_wakeup_path(dev))
+		disable_irq_wake(hcd->irq);
 
 	if (pdata->power_on) {
 		int err = pdata->power_on(pdev);

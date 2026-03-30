@@ -1593,10 +1593,7 @@ static void ncm_free_inst(struct usb_function_instance *f)
 	struct f_ncm_opts *opts;
 
 	opts = container_of(f, struct f_ncm_opts, func_inst);
-	if (opts->bound)
-		gether_cleanup(netdev_priv(opts->net));
-	else
-		free_netdev(opts->net);
+	free_netdev(opts->net);
 	kfree(opts->ncm_interf_group);
 	kfree(opts);
 }
@@ -1655,6 +1652,7 @@ static void ncm_free(struct usb_function *f)
 static void ncm_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct f_ncm *ncm = func_to_ncm(f);
+	struct f_ncm_opts *opts = container_of(f->fi, struct f_ncm_opts, func_inst);
 
 	DBG(c->cdev, "ncm unbind\n");
 
@@ -1673,6 +1671,29 @@ static void ncm_unbind(struct usb_configuration *c, struct usb_function *f)
 
 	kfree(ncm->notify_req->buf);
 	usb_ep_free_request(ncm->notify, ncm->notify_req);
+
+	if (opts->bound)
+		gether_unregister_netdev(netdev_priv(opts->net));
+}
+
+static void ncm_suspend(struct usb_function *f)
+{
+	struct f_ncm *ncm = func_to_ncm(f);
+	struct usb_composite_dev *cdev = ncm->port.func.config->cdev;
+
+	DBG(cdev, "ncm Suspend\n");
+
+	gether_suspend(&ncm->port);
+}
+
+static void ncm_resume(struct usb_function *f)
+{
+	struct f_ncm *ncm = func_to_ncm(f);
+	struct usb_composite_dev *cdev = ncm->port.func.config->cdev;
+
+	DBG(cdev, "ncm Resume\n");
+
+	gether_resume(&ncm->port);
 }
 
 static struct usb_function *ncm_alloc(struct usb_function_instance *fi)
@@ -1715,6 +1736,8 @@ static struct usb_function *ncm_alloc(struct usb_function_instance *fi)
 	ncm->port.func.setup = ncm_setup;
 	ncm->port.func.disable = ncm_disable;
 	ncm->port.func.free_func = ncm_free;
+	ncm->port.func.suspend = ncm_suspend;
+	ncm->port.func.resume = ncm_resume;
 
 	ncm->port.wrap = ncm_wrap_ntb;
 	ncm->port.unwrap = ncm_unwrap_ntb;

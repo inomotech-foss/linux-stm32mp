@@ -15,6 +15,7 @@ properties:
       - st,stm32-rtc
       - st,stm32h7-rtc
       - st,stm32mp1-rtc
+      - st,stm32mp25-rtc
 
   reg:
     maxItems: 1
@@ -52,6 +53,23 @@ properties:
       override default rtc_ck parent clock phandle of the new parent clock of rtc_ck
     maxItems: 1
 
+  st,lsco:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: |
+      To select and enable RTC Low Speed Clock Output.
+      Refer to <include/dt-bindings/rtc/rtc-stm32.h> for the supported values.
+      Pinctrl state named "default" may be defined to reserve pin for RTC output.
+
+  "#clock-cells":
+    const: 0
+
+  st,alarm:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: |
+      To select and enable RTC Alarm A output.
+      Refer to <include/dt-bindings/rtc/rtc-stm32.h> for the supported values.
+      Pinctrl state named "default" may be defined to reserve pin for RTC output.
+
 allOf:
   - if:
       properties:
@@ -64,6 +82,10 @@ allOf:
         clocks:
           minItems: 1
           maxItems: 1
+
+        st,lsco: false
+
+        st,alarm: false
 
         clock-names: false
 
@@ -82,6 +104,10 @@ allOf:
           minItems: 2
           maxItems: 2
 
+        st,lsco: false
+
+        st,alarm: false
+
       required:
         - clock-names
         - st,syscfg
@@ -90,7 +116,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: st,stm32mp1-rtc
+            anyOf:
+              - const: st,stm32mp1-rtc
+              - const: st,stm32mp25-rtc
 
     then:
       properties:
@@ -101,8 +129,26 @@ allOf:
         assigned-clocks: false
         assigned-clock-parents: false
 
+        st,lsco:
+          maxItems: 1
+
+        st,alarm:
+          maxItems: 1
+
       required:
         - clock-names
+
+  - if:
+      not:
+        properties:
+          st,lsco:
+            const: 0
+    then:
+      required:
+        - "#clock-cells"
+    else:
+      properties:
+        "#clock-cells": false
 
 required:
   - compatible
@@ -130,12 +176,18 @@ examples:
   - |
     #include <dt-bindings/interrupt-controller/arm-gic.h>
     #include <dt-bindings/clock/stm32mp1-clks.h>
+    #include <dt-bindings/rtc/rtc-stm32.h>
     rtc@5c004000 {
       compatible = "st,stm32mp1-rtc";
       reg = <0x5c004000 0x400>;
       clocks = <&rcc RTCAPB>, <&rcc RTC>;
       clock-names = "pclk", "rtc_ck";
+      #clock-cells = <0>;
       interrupts = <GIC_SPI 3 IRQ_TYPE_LEVEL_HIGH>;
+      st,alarm = <RTC_OUT1>;
+      st,lsco = <RTC_OUT2_RMP>;
+      pinctrl-0 = <&rtc_out1_pins_a &rtc_out2_rmp_pins_a>;
+      pinctrl-names = "default";
     };
 
 ...

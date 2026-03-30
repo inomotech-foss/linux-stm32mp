@@ -172,7 +172,7 @@ static int stpmic1_probe(struct i2c_client *i2c)
 
 	ret = devm_register_sys_off_handler(ddata->dev,
 					    SYS_OFF_MODE_POWER_OFF,
-					    SYS_OFF_PRIO_DEFAULT,
+					    SYS_OFF_PRIO_LOW,
 					    stpmic1_power_off,
 					    ddata);
 	if (ret) {
@@ -190,6 +190,9 @@ static int stpmic1_suspend(struct device *dev)
 
 	disable_irq(pmic_dev->irq);
 
+	if (device_may_wakeup(dev))
+		enable_irq_wake(pmic_dev->irq);
+
 	return 0;
 }
 
@@ -202,6 +205,9 @@ static int stpmic1_resume(struct device *dev)
 	ret = regcache_sync(pmic_dev->regmap);
 	if (ret)
 		return ret;
+
+	if (device_may_wakeup(dev))
+		disable_irq_wake(pmic_dev->irq);
 
 	enable_irq(pmic_dev->irq);
 

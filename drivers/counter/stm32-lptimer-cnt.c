@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/types.h>
 
 struct stm32_lptim_cnt {
@@ -34,7 +35,15 @@ static int stm32_lptim_is_enabled(struct stm32_lptim_cnt *priv)
 	u32 val;
 	int ret;
 
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret)
+		return ret;
+
 	ret = regmap_read(priv->regmap, STM32_LPTIM_CR, &val);
+	if (ret)
+		return ret;
+
+	ret = pm_runtime_put_sync_suspend(priv->dev);
 	if (ret)
 		return ret;
 
@@ -47,41 +56,47 @@ static int stm32_lptim_set_enable_state(struct stm32_lptim_cnt *priv,
 	int ret;
 	u32 val;
 
-	val = FIELD_PREP(STM32_LPTIM_ENABLE, enable);
-	ret = regmap_write(priv->regmap, STM32_LPTIM_CR, val);
-	if (ret)
-		return ret;
-
 	if (!enable) {
-		clk_disable(priv->clk);
+		ret = regmap_write(priv->regmap, STM32_LPTIM_CR, 0);
+		if (ret)
+			return ret;
+
+		ret = pm_runtime_put_sync_suspend(priv->dev);
+		if (ret < 0)
+			return ret;
+
 		priv->enabled = false;
 		return 0;
 	}
 
-	ret = clk_enable(priv->clk);
+	ret = pm_runtime_resume_and_get(priv->dev);
 	if (ret)
-		goto disable_cnt;
+		return ret;
+
+	ret = regmap_write(priv->regmap, STM32_LPTIM_CR, STM32_LPTIM_ENABLE);
+	if (ret)
+		goto disable_clk;
 
 	/* LP timer must be enabled before writing CMP & ARR */
 	ret = regmap_write(priv->regmap, STM32_LPTIM_ARR, priv->ceiling);
 	if (ret)
-		goto disable_clk;
+		goto disable_cnt;
 
 	ret = regmap_write(priv->regmap, STM32_LPTIM_CMP, 0);
 	if (ret)
-		goto disable_clk;
+		goto disable_cnt;
 
 	/* ensure CMP & ARR registers are properly written */
 	ret = regmap_read_poll_timeout(priv->regmap, STM32_LPTIM_ISR, val,
 				       (val & STM32_LPTIM_CMPOK_ARROK) == STM32_LPTIM_CMPOK_ARROK,
 				       100, 1000);
 	if (ret)
-		goto disable_clk;
+		goto disable_cnt;
 
 	ret = regmap_write(priv->regmap, STM32_LPTIM_ICR,
 			   STM32_LPTIM_CMPOKCF_ARROKCF);
 	if (ret)
-		goto disable_clk;
+		goto disable_cnt;
 
 	priv->enabled = true;
 
@@ -89,10 +104,10 @@ static int stm32_lptim_set_enable_state(struct stm32_lptim_cnt *priv,
 	return regmap_update_bits(priv->regmap, STM32_LPTIM_CR,
 				  STM32_LPTIM_CNTSTRT, STM32_LPTIM_CNTSTRT);
 
-disable_clk:
-	clk_disable(priv->clk);
 disable_cnt:
 	regmap_write(priv->regmap, STM32_LPTIM_CR, 0);
+disable_clk:
+	pm_runtime_put_sync_suspend(priv->dev);
 
 	return ret;
 }
@@ -102,6 +117,7 @@ static int stm32_lptim_setup(struct stm32_lptim_cnt *priv, int enable)
 	u32 mask = STM32_LPTIM_ENC | STM32_LPTIM_COUNTMODE |
 		   STM32_LPTIM_CKPOL | STM32_LPTIM_PRESC;
 	u32 val;
+	int ret;
 
 	/* Setup LP timer encoder/counter and polarity, without prescaler */
 	if (priv->quadrature_mode)
@@ -110,7 +126,17 @@ static int stm32_lptim_setup(struct stm32_lptim_cnt *priv, int enable)
 		val = enable ? STM32_LPTIM_COUNTMODE : 0;
 	val |= FIELD_PREP(STM32_LPTIM_CKPOL, enable ? priv->polarity : 0);
 
-	return regmap_update_bits(priv->regmap, STM32_LPTIM_CFGR, mask, val);
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(priv->regmap, STM32_LPTIM_CFGR, mask, val);
+	if (ret) {
+		pm_runtime_put_sync_suspend(priv->dev);
+		return ret;
+	}
+
+	return pm_runtime_put_sync_suspend(priv->dev);
 }
 
 /*
@@ -150,7 +176,17 @@ static int stm32_lptim_cnt_read(struct counter_device *counter,
 	u32 cnt;
 	int ret;
 
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret)
+		return ret;
+
 	ret = regmap_read(priv->regmap, STM32_LPTIM_CNT, &cnt);
+	if (ret) {
+		pm_runtime_put_sync_suspend(priv->dev);
+		return ret;
+	}
+
+	ret = pm_runtime_put_sync_suspend(priv->dev);
 	if (ret)
 		return ret;
 
@@ -449,6 +485,10 @@ static int stm32_lptim_cnt_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, priv);
 
+	ret = devm_pm_runtime_enable(&pdev->dev);
+	if (ret)
+		return ret;
+
 	ret = devm_counter_add(&pdev->dev, counter);
 	if (ret < 0)
 		return dev_err_probe(&pdev->dev, ret, "Failed to add counter\n");
@@ -456,7 +496,6 @@ static int stm32_lptim_cnt_probe(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int stm32_lptim_cnt_suspend(struct device *dev)
 {
 	struct stm32_lptim_cnt *priv = dev_get_drvdata(dev);
@@ -501,10 +540,10 @@ static int stm32_lptim_cnt_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(stm32_lptim_cnt_pm_ops, stm32_lptim_cnt_suspend,
-			 stm32_lptim_cnt_resume);
+static const struct dev_pm_ops stm32_lptim_cnt_pm_ops = {
+	SYSTEM_SLEEP_PM_OPS(stm32_lptim_cnt_suspend, stm32_lptim_cnt_resume)
+};
 
 static const struct of_device_id stm32_lptim_cnt_of_match[] = {
 	{ .compatible = "st,stm32-lptimer-counter", },
@@ -517,7 +556,7 @@ static struct platform_driver stm32_lptim_cnt_driver = {
 	.driver = {
 		.name = "stm32-lptimer-counter",
 		.of_match_table = stm32_lptim_cnt_of_match,
-		.pm = &stm32_lptim_cnt_pm_ops,
+		.pm = pm_ptr(&stm32_lptim_cnt_pm_ops),
 	},
 };
 module_platform_driver(stm32_lptim_cnt_driver);

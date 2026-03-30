@@ -12,7 +12,10 @@
 #include <linux/component.h>
 #include <linux/debugfs.h>
 #include <linux/iopoll.h>
+#include <linux/math64.h>
+#include <linux/media-bus-format.h>
 #include <linux/module.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
@@ -316,7 +319,7 @@ static int dw_mipi_dsi_host_attach(struct mipi_dsi_host *host,
 	struct dw_mipi_dsi *dsi = host_to_dsi(host);
 	const struct dw_mipi_dsi_plat_data *pdata = dsi->plat_data;
 	struct drm_bridge *bridge;
-	int ret;
+	int ret, nb_endpoints, i;
 
 	if (device->lanes > dsi->plat_data->max_data_lanes) {
 		dev_err(dsi->dev, "the number of data lanes(%u) is too many\n",
@@ -329,14 +332,30 @@ static int dw_mipi_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->format = device->format;
 	dsi->mode_flags = device->mode_flags;
 
-	bridge = devm_drm_of_get_bridge(dsi->dev, dsi->dev->of_node, 1, 0);
-	if (IS_ERR(bridge))
-		return PTR_ERR(bridge);
+	nb_endpoints = of_graph_get_endpoint_count(dsi->dev->of_node);
+	if (!nb_endpoints)
+		return -ENODEV;
 
-	bridge->pre_enable_prev_first = true;
-	dsi->panel_bridge = bridge;
+	for (i = 1; i < nb_endpoints; i++) {
+		bridge = devm_drm_of_get_bridge(dsi->dev, dsi->dev->of_node, i, 0);
 
-	drm_bridge_add(&dsi->bridge);
+		/*
+		 * If at least one endpoint is -ENODEV, continue probing,
+		 * else if at least one endpoint returned an error
+		 * (ie -EPROBE_DEFER) then stop probing.
+		 */
+		if (IS_ERR(bridge)) {
+			if (PTR_ERR(bridge) == -ENODEV)
+				continue;
+			else
+				return PTR_ERR(bridge);
+		} else {
+			bridge->pre_enable_prev_first = true;
+			dsi->panel_bridge = bridge;
+			drm_bridge_add(&dsi->bridge);
+			break;
+		}
+	}
 
 	if (pdata->host_ops && pdata->host_ops->attach) {
 		ret = pdata->host_ops->attach(pdata->priv_data, device);
@@ -406,7 +425,7 @@ static int dw_mipi_dsi_gen_pkt_hdr_write(struct dw_mipi_dsi *dsi, u32 hdr_val)
 				 val, !(val & GEN_CMD_FULL), 1000,
 				 CMD_PKT_STATUS_TIMEOUT_US);
 	if (ret) {
-		dev_err(dsi->dev, "failed to get available command FIFO\n");
+		dev_dbg(dsi->dev, "failed to get available command FIFO\n");
 		return ret;
 	}
 
@@ -417,7 +436,7 @@ static int dw_mipi_dsi_gen_pkt_hdr_write(struct dw_mipi_dsi *dsi, u32 hdr_val)
 				 val, (val & mask) == mask,
 				 1000, CMD_PKT_STATUS_TIMEOUT_US);
 	if (ret) {
-		dev_err(dsi->dev, "failed to write command FIFO\n");
+		dev_dbg(dsi->dev, "failed to write command FIFO\n");
 		return ret;
 	}
 
@@ -630,7 +649,7 @@ static void dw_mipi_dsi_init(struct dw_mipi_dsi *dsi)
 	 * timeout clock division should be computed with the
 	 * high speed transmission counter timeout and byte lane...
 	 */
-	dsi_write(dsi, DSI_CLKMGR_CFG, TO_CLK_DIVISION(10) |
+	dsi_write(dsi, DSI_CLKMGR_CFG, TO_CLK_DIVISION(0) |
 		  TX_ESC_CLK_DIVISION(esc_clk_division));
 }
 
@@ -638,6 +657,21 @@ static void dw_mipi_dsi_dpi_config(struct dw_mipi_dsi *dsi,
 				   const struct drm_display_mode *mode)
 {
 	u32 val = 0, color = 0;
+	struct drm_bridge *bridge = &dsi->bridge;
+	struct drm_encoder *encoder = bridge->encoder;
+	struct drm_connector_list_iter iter;
+	struct drm_connector *connector = NULL;
+	u32 bus_flags = 0;
+
+	/* Get the connector from encoder */
+	drm_connector_list_iter_begin(encoder->dev, &iter);
+	drm_for_each_connector_iter(connector, &iter)
+		if (connector->encoder == encoder)
+			break;
+	drm_connector_list_iter_end(&iter);
+
+	if (connector)
+		bus_flags = connector->display_info.bus_flags;
 
 	switch (dsi->format) {
 	case MIPI_DSI_FMT_RGB888:
@@ -658,6 +692,8 @@ static void dw_mipi_dsi_dpi_config(struct dw_mipi_dsi *dsi,
 		val |= VSYNC_ACTIVE_LOW;
 	if (mode->flags & DRM_MODE_FLAG_NHSYNC)
 		val |= HSYNC_ACTIVE_LOW;
+	if (bus_flags & DRM_BUS_FLAG_DE_LOW)
+		val |= DATAEN_ACTIVE_LOW;
 
 	dsi_write(dsi, DSI_DPI_VCID, DPI_VCID(dsi->channel));
 	dsi_write(dsi, DSI_DPI_COLOR_CODING, color);
@@ -666,7 +702,12 @@ static void dw_mipi_dsi_dpi_config(struct dw_mipi_dsi *dsi,
 
 static void dw_mipi_dsi_packet_handler_config(struct dw_mipi_dsi *dsi)
 {
-	dsi_write(dsi, DSI_PCKHDL_CFG, CRC_RX_EN | ECC_RX_EN | BTA_EN);
+	u32 val = CRC_RX_EN | ECC_RX_EN | BTA_EN | EOTP_TX_EN;
+
+	if (dsi->mode_flags & MIPI_DSI_MODE_NO_EOT_PACKET)
+		val &= ~EOTP_TX_EN;
+
+	dsi_write(dsi, DSI_PCKHDL_CFG, val);
 }
 
 static void dw_mipi_dsi_video_packet_config(struct dw_mipi_dsi *dsi,
@@ -693,7 +734,7 @@ static void dw_mipi_dsi_command_mode_config(struct dw_mipi_dsi *dsi)
 	 * compute high speed transmission counter timeout according
 	 * to the timeout clock division (TO_CLK_DIVISION) and byte lane...
 	 */
-	dsi_write(dsi, DSI_TO_CNT_CFG, HSTX_TO_CNT(1000) | LPRX_TO_CNT(1000));
+	dsi_write(dsi, DSI_TO_CNT_CFG, HSTX_TO_CNT(0) | LPRX_TO_CNT(0));
 	/*
 	 * TODO dw drv improvements
 	 * the Bus-Turn-Around Timeout Counter should be computed
@@ -703,19 +744,44 @@ static void dw_mipi_dsi_command_mode_config(struct dw_mipi_dsi *dsi)
 	dsi_write(dsi, DSI_MODE_CFG, ENABLE_CMD_MODE);
 }
 
+static const u32 minimum_lbccs[] = {10, 5, 4, 3};
+
+static inline u32 dw_mipi_dsi_get_minimum_lbcc(struct dw_mipi_dsi *dsi)
+{
+	return minimum_lbccs[dsi->lanes - 1];
+}
+
 /* Get lane byte clock cycles. */
 static u32 dw_mipi_dsi_get_hcomponent_lbcc(struct dw_mipi_dsi *dsi,
 					   const struct drm_display_mode *mode,
 					   u32 hcomponent)
 {
-	u32 frac, lbcc;
+	u32 frac, lbcc, minimum_lbcc;
+	int bpp;
 
-	lbcc = hcomponent * dsi->lane_mbps * MSEC_PER_SEC / 8;
+	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO_BURST) {
+		/* lbcc based on lane_mbps */
+		lbcc = hcomponent * dsi->lane_mbps * MSEC_PER_SEC / 8;
+	} else {
+		/* lbcc based on pixel clock rate */
+		bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
+		if (bpp < 0) {
+			dev_err(dsi->dev, "failed to get bpp\n");
+			return 0;
+		}
+
+		lbcc = div_u64((u64)hcomponent * mode->clock * bpp, dsi->lanes * 8);
+	}
 
 	frac = lbcc % mode->clock;
 	lbcc = lbcc / mode->clock;
 	if (frac)
 		lbcc++;
+
+	minimum_lbcc = dw_mipi_dsi_get_minimum_lbcc(dsi);
+
+	if (lbcc < minimum_lbcc)
+		lbcc = minimum_lbcc;
 
 	return lbcc;
 }
@@ -904,7 +970,12 @@ static void dw_mipi_dsi_mode_set(struct dw_mipi_dsi *dsi,
 	if (ret)
 		DRM_DEBUG_DRIVER("Phy get_lane_mbps() failed\n");
 
-	pm_runtime_get_sync(dsi->dev);
+	ret = pm_runtime_resume_and_get(dsi->dev);
+	if (ret < 0) {
+		DRM_DEBUG_DRIVER("Failed to set mode, cannot resume pm\n");
+		return;
+	}
+
 	dw_mipi_dsi_init(dsi);
 	dw_mipi_dsi_dpi_config(dsi, adjusted_mode);
 	dw_mipi_dsi_packet_handler_config(dsi);
@@ -989,11 +1060,6 @@ static int dw_mipi_dsi_bridge_attach(struct drm_bridge *bridge,
 				     enum drm_bridge_attach_flags flags)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
-
-	if (!bridge->encoder) {
-		DRM_ERROR("Parent encoder object not found\n");
-		return -ENODEV;
-	}
 
 	/* Set the encoder type as caller does not know it */
 	bridge->encoder->encoder_type = DRM_MODE_ENCODER_DSI;
@@ -1109,6 +1175,7 @@ __dw_mipi_dsi_probe(struct platform_device *pdev,
 	struct reset_control *apb_rst;
 	struct dw_mipi_dsi *dsi;
 	int ret;
+	u32 pwr;
 
 	dsi = devm_kzalloc(dev, sizeof(*dsi), GFP_KERNEL);
 	if (!dsi)
@@ -1143,28 +1210,35 @@ __dw_mipi_dsi_probe(struct platform_device *pdev,
 	 * Note that the reset was not defined in the initial device tree, so
 	 * we have to be prepared for it not being found.
 	 */
-	apb_rst = devm_reset_control_get_optional_exclusive(dev, "apb");
-	if (IS_ERR(apb_rst)) {
-		ret = PTR_ERR(apb_rst);
+	pwr = dsi_read(dsi, DSI_PWR_UP);
+	/*
+	 * To obtain a continuous display after the probe,
+	 * do not reset the DSI bridge if it is powered on.
+	 */
+	if (pwr != POWERUP) {
+		apb_rst = devm_reset_control_get_optional_exclusive(dev, "apb");
+		if (IS_ERR(apb_rst)) {
+			ret = PTR_ERR(apb_rst);
 
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "Unable to get reset control: %d\n", ret);
+			if (ret != -EPROBE_DEFER)
+				dev_err(dev, "Unable to get reset control: %d\n", ret);
 
-		return ERR_PTR(ret);
-	}
-
-	if (apb_rst) {
-		ret = clk_prepare_enable(dsi->pclk);
-		if (ret) {
-			dev_err(dev, "%s: Failed to enable pclk\n", __func__);
 			return ERR_PTR(ret);
 		}
 
-		reset_control_assert(apb_rst);
-		usleep_range(10, 20);
-		reset_control_deassert(apb_rst);
+		if (apb_rst) {
+			ret = clk_prepare_enable(dsi->pclk);
+			if (ret) {
+				dev_err(dev, "%s: Failed to enable pclk\n", __func__);
+				return ERR_PTR(ret);
+			}
 
-		clk_disable_unprepare(dsi->pclk);
+			reset_control_assert(apb_rst);
+			usleep_range(10, 20);
+			reset_control_deassert(apb_rst);
+
+			clk_disable_unprepare(dsi->pclk);
+		}
 	}
 
 	dw_mipi_dsi_debugfs_init(dsi);

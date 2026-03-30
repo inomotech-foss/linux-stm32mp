@@ -40,13 +40,16 @@
 #include <linux/mutex.h>
 #include <linux/property.h>
 #include <linux/slab.h>
+#include <linux/stringify.h>
 #include <linux/types.h>
 
 #include <linux/iio/backend.h>
+#include <linux/iio/iio.h>
 
 struct iio_backend {
 	struct list_head entry;
 	const struct iio_backend_ops *ops;
+	struct device *frontend_dev;
 	struct device *dev;
 	struct module *owner;
 	void *priv;
@@ -109,12 +112,15 @@ static DEFINE_MUTEX(iio_back_lock);
 	__ret = iio_backend_check_op(__back, op);		\
 	if (!__ret)						\
 		__back->ops->op(__back, ##args);		\
+	else							\
+		dev_dbg(__back->dev, "Op(%s) not implemented\n",\
+			__stringify(op));			\
 }
 
 /**
  * iio_backend_chan_enable - Enable a backend channel
- * @back:	Backend device
- * @chan:	Channel number
+ * @back: Backend device
+ * @chan: Channel number
  *
  * RETURNS:
  * 0 on success, negative error number on failure.
@@ -127,8 +133,8 @@ EXPORT_SYMBOL_NS_GPL(iio_backend_chan_enable, IIO_BACKEND);
 
 /**
  * iio_backend_chan_disable - Disable a backend channel
- * @back:	Backend device
- * @chan:	Channel number
+ * @back: Backend device
+ * @chan: Channel number
  *
  * RETURNS:
  * 0 on success, negative error number on failure.
@@ -145,9 +151,32 @@ static void __iio_backend_disable(void *back)
 }
 
 /**
+ * iio_backend_disable - Backend disable
+ * @back: Backend device
+ */
+void iio_backend_disable(struct iio_backend *back)
+{
+	__iio_backend_disable(back);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_disable, IIO_BACKEND);
+
+/**
+ * iio_backend_enable - Backend enable
+ * @back: Backend device
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_enable(struct iio_backend *back)
+{
+	return iio_backend_op_call(back, enable);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_enable, IIO_BACKEND);
+
+/**
  * devm_iio_backend_enable - Device managed backend enable
- * @dev:	Consumer device for the backend
- * @back:	Backend device
+ * @dev: Consumer device for the backend
+ * @back: Backend device
  *
  * RETURNS:
  * 0 on success, negative error number on failure.
@@ -156,7 +185,7 @@ int devm_iio_backend_enable(struct device *dev, struct iio_backend *back)
 {
 	int ret;
 
-	ret = iio_backend_op_call(back, enable);
+	ret = iio_backend_enable(back);
 	if (ret)
 		return ret;
 
@@ -166,9 +195,9 @@ EXPORT_SYMBOL_NS_GPL(devm_iio_backend_enable, IIO_BACKEND);
 
 /**
  * iio_backend_data_format_set - Configure the channel data format
- * @back:	Backend device
- * @chan:	Channel number
- * @data:	Data format
+ * @back: Backend device
+ * @chan: Channel number
+ * @data: Data format
  *
  * Properly configure a channel with respect to the expected data format. A
  * @struct iio_backend_data_fmt must be passed with the settings.
@@ -186,6 +215,130 @@ int iio_backend_data_format_set(struct iio_backend *back, unsigned int chan,
 }
 EXPORT_SYMBOL_NS_GPL(iio_backend_data_format_set, IIO_BACKEND);
 
+/**
+ * iio_backend_data_source_set - Select data source
+ * @back: Backend device
+ * @chan: Channel number
+ * @data: Data source
+ *
+ * A given backend may have different sources to stream/sync data. This allows
+ * to choose that source.
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_data_source_set(struct iio_backend *back, unsigned int chan,
+				enum iio_backend_data_source data)
+{
+	if (data >= IIO_BACKEND_DATA_SOURCE_MAX)
+		return -EINVAL;
+
+	return iio_backend_op_call(back, data_source_set, chan, data);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_data_source_set, IIO_BACKEND);
+
+/**
+ * iio_backend_set_sampling_freq - Set channel sampling rate
+ * @back: Backend device
+ * @chan: Channel number
+ * @sample_rate_hz: Sample rate
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_set_sampling_freq(struct iio_backend *back, unsigned int chan,
+				  u64 sample_rate_hz)
+{
+	return iio_backend_op_call(back, set_sample_rate, chan, sample_rate_hz);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_set_sampling_freq, IIO_BACKEND);
+
+/**
+ * iio_backend_test_pattern_set - Configure a test pattern
+ * @back: Backend device
+ * @chan: Channel number
+ * @pattern: Test pattern
+ *
+ * Configure a test pattern on the backend. This is typically used for
+ * calibrating the timings on the data digital interface.
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_test_pattern_set(struct iio_backend *back,
+				 unsigned int chan,
+				 enum iio_backend_test_pattern pattern)
+{
+	if (pattern >= IIO_BACKEND_TEST_PATTERN_MAX)
+		return -EINVAL;
+
+	return iio_backend_op_call(back, test_pattern_set, chan, pattern);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_test_pattern_set, IIO_BACKEND);
+
+/**
+ * iio_backend_chan_status - Get the channel status
+ * @back: Backend device
+ * @chan: Channel number
+ * @error: Error indication
+ *
+ * Get the current state of the backend channel. Typically used to check if
+ * there were any errors sending/receiving data.
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_chan_status(struct iio_backend *back, unsigned int chan,
+			    bool *error)
+{
+	return iio_backend_op_call(back, chan_status, chan, error);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_chan_status, IIO_BACKEND);
+
+/**
+ * iio_backend_iodelay_set - Set digital I/O delay
+ * @back: Backend device
+ * @lane: Lane number
+ * @taps: Number of taps
+ *
+ * Controls delays on sending/receiving data. One usecase for this is to
+ * calibrate the data digital interface so we get the best results when
+ * transferring data. Note that @taps has no unit since the actual delay per tap
+ * is very backend specific. Hence, frontend devices typically should go through
+ * an array of @taps (the size of that array should typically match the size of
+ * calibration points on the frontend device) and call this API.
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_iodelay_set(struct iio_backend *back, unsigned int lane,
+			    unsigned int taps)
+{
+	return iio_backend_op_call(back, iodelay_set, lane, taps);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_iodelay_set, IIO_BACKEND);
+
+/**
+ * iio_backend_data_sample_trigger - Control when to sample data
+ * @back: Backend device
+ * @trigger: Data trigger
+ *
+ * Mostly useful for input backends. Configures the backend for when to sample
+ * data (eg: rising vs falling edge).
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_data_sample_trigger(struct iio_backend *back,
+				    enum iio_backend_sample_trigger trigger)
+{
+	if (trigger >= IIO_BACKEND_SAMPLE_TRIGGER_MAX)
+		return -EINVAL;
+
+	return iio_backend_op_call(back, data_sample_trigger, trigger);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_data_sample_trigger, IIO_BACKEND);
+
 static void iio_backend_free_buffer(void *arg)
 {
 	struct iio_backend_buffer_pair *pair = arg;
@@ -195,9 +348,9 @@ static void iio_backend_free_buffer(void *arg)
 
 /**
  * devm_iio_backend_request_buffer - Device managed buffer request
- * @dev:	Consumer device for the backend
- * @back:	Backend device
- * @indio_dev:	IIO device
+ * @dev: Consumer device for the backend
+ * @back: Backend device
+ * @indio_dev: IIO device
  *
  * Request an IIO buffer from the backend. The type of the buffer (typically
  * INDIO_BUFFER_HARDWARE) is up to the backend to decide. This is because,
@@ -231,6 +384,160 @@ int devm_iio_backend_request_buffer(struct device *dev,
 }
 EXPORT_SYMBOL_NS_GPL(devm_iio_backend_request_buffer, IIO_BACKEND);
 
+/**
+ * iio_backend_read_raw - Read a channel attribute from a backend device.
+ * @back:	Backend device
+ * @chan:	IIO channel reference
+ * @val:	First returned value
+ * @val2:	Second returned value
+ * @mask:	Specify the attribute to return
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_read_raw(struct iio_backend *back,
+			 struct iio_chan_spec const *chan, int *val, int *val2,
+			 long mask)
+{
+	return iio_backend_op_call(back, read_raw, chan, val, val2, mask);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_read_raw, IIO_BACKEND);
+
+static struct iio_backend *iio_backend_from_indio_dev_parent(const struct device *dev)
+{
+	struct iio_backend *back = ERR_PTR(-ENODEV), *iter;
+
+	/*
+	 * We deliberately go through all backends even after finding a match.
+	 * The reason is that we want to catch frontend devices which have more
+	 * than one backend in which case returning the first we find is bogus.
+	 * For those cases, frontends need to explicitly define
+	 * get_iio_backend() in struct iio_info.
+	 */
+	guard(mutex)(&iio_back_lock);
+	list_for_each_entry(iter, &iio_back_list, entry) {
+		if (dev == iter->frontend_dev) {
+			if (!IS_ERR(back)) {
+				dev_warn(dev,
+					 "Multiple backends! get_iio_backend() needs to be implemented");
+				return ERR_PTR(-ENODEV);
+			}
+
+			back = iter;
+		}
+	}
+
+	return back;
+}
+
+/**
+ * iio_backend_ext_info_get - IIO ext_info read callback
+ * @indio_dev: IIO device
+ * @private: Data private to the driver
+ * @chan: IIO channel
+ * @buf: Buffer where to place the attribute data
+ *
+ * This helper is intended to be used by backends that extend an IIO channel
+ * (through iio_backend_extend_chan_spec()) with extended info. In that case,
+ * backends are not supposed to give their own callbacks (as they would not have
+ * a way to get the backend from indio_dev). This is the getter.
+ *
+ * RETURNS:
+ * Number of bytes written to buf, negative error number on failure.
+ */
+ssize_t iio_backend_ext_info_get(struct iio_dev *indio_dev, uintptr_t private,
+				 const struct iio_chan_spec *chan, char *buf)
+{
+	struct iio_backend *back;
+
+	/*
+	 * The below should work for the majority of the cases. It will not work
+	 * when one frontend has multiple backends in which case we'll need a
+	 * new callback in struct iio_info so we can directly request the proper
+	 * backend from the frontend. Anyways, let's only introduce new options
+	 * when really needed...
+	 */
+	back = iio_backend_from_indio_dev_parent(indio_dev->dev.parent);
+	if (IS_ERR(back))
+		return PTR_ERR(back);
+
+	return iio_backend_op_call(back, ext_info_get, private, chan, buf);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_ext_info_get, IIO_BACKEND);
+
+/**
+ * iio_backend_ext_info_set - IIO ext_info write callback
+ * @indio_dev: IIO device
+ * @private: Data private to the driver
+ * @chan: IIO channel
+ * @buf: Buffer holding the sysfs attribute
+ * @len: Buffer length
+ *
+ * This helper is intended to be used by backends that extend an IIO channel
+ * (trough iio_backend_extend_chan_spec()) with extended info. In that case,
+ * backends are not supposed to give their own callbacks (as they would not have
+ * a way to get the backend from indio_dev). This is the setter.
+ *
+ * RETURNS:
+ * Buffer length on success, negative error number on failure.
+ */
+ssize_t iio_backend_ext_info_set(struct iio_dev *indio_dev, uintptr_t private,
+				 const struct iio_chan_spec *chan,
+				 const char *buf, size_t len)
+{
+	struct iio_backend *back;
+
+	back = iio_backend_from_indio_dev_parent(indio_dev->dev.parent);
+	if (IS_ERR(back))
+		return PTR_ERR(back);
+
+	return iio_backend_op_call(back, ext_info_set, private, chan, buf, len);
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_ext_info_set, IIO_BACKEND);
+
+/**
+ * iio_backend_extend_chan_spec - Extend an IIO channel
+ * @back: Backend device
+ * @chan: IIO channel
+ *
+ * Some backends may have their own functionalities and hence capable of
+ * extending a frontend's channel.
+ *
+ * RETURNS:
+ * 0 on success, negative error number on failure.
+ */
+int iio_backend_extend_chan_spec(struct iio_backend *back,
+				 struct iio_chan_spec *chan)
+{
+	const struct iio_chan_spec_ext_info *frontend_ext_info = chan->ext_info;
+	const struct iio_chan_spec_ext_info *back_ext_info;
+	int ret;
+
+	ret = iio_backend_op_call(back, extend_chan_spec, chan);
+	if (ret)
+		return ret;
+	/*
+	 * Let's keep things simple for now. Don't allow to overwrite the
+	 * frontend's extended info. If ever needed, we can support appending
+	 * it.
+	 */
+	if (frontend_ext_info && chan->ext_info != frontend_ext_info)
+		return -EOPNOTSUPP;
+	if (!chan->ext_info)
+		return 0;
+
+	/* Don't allow backends to get creative and force their own handlers */
+	for (back_ext_info = chan->ext_info; back_ext_info->name; back_ext_info++) {
+		if (back_ext_info->read != iio_backend_ext_info_get)
+			return -EINVAL;
+		if (back_ext_info->write != iio_backend_ext_info_set)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(iio_backend_extend_chan_spec, IIO_BACKEND);
+
 static void iio_backend_release(void *arg)
 {
 	struct iio_backend *back = arg;
@@ -263,24 +570,17 @@ static int __devm_iio_backend_get(struct device *dev, struct iio_backend *back)
 				     "Could not link to supplier(%s)\n",
 				     dev_name(back->dev));
 
+	back->frontend_dev = dev;
+
 	dev_dbg(dev, "Found backend(%s) device\n", dev_name(back->dev));
 
 	return 0;
 }
 
-/**
- * devm_iio_backend_get - Device managed backend device get
- * @dev:	Consumer device for the backend
- * @name:	Backend name
- *
- * Get's the backend associated with @dev.
- *
- * RETURNS:
- * A backend pointer, negative error pointer otherwise.
- */
-struct iio_backend *devm_iio_backend_get(struct device *dev, const char *name)
+static struct iio_backend *__devm_iio_backend_fwnode_get(struct device *dev, const char *name,
+							 struct fwnode_handle *fwnode)
 {
-	struct fwnode_handle *fwnode;
+	struct fwnode_handle *fwnode_back;
 	struct iio_backend *back;
 	unsigned int index;
 	int ret;
@@ -295,7 +595,7 @@ struct iio_backend *devm_iio_backend_get(struct device *dev, const char *name)
 		index = 0;
 	}
 
-	fwnode = fwnode_find_reference(dev_fwnode(dev), "io-backends", index);
+	fwnode_back = fwnode_find_reference(fwnode, "io-backends", index);
 	if (IS_ERR(fwnode)) {
 		dev_err_probe(dev, PTR_ERR(fwnode),
 			      "Cannot get Firmware reference\n");
@@ -304,10 +604,10 @@ struct iio_backend *devm_iio_backend_get(struct device *dev, const char *name)
 
 	guard(mutex)(&iio_back_lock);
 	list_for_each_entry(back, &iio_back_list, entry) {
-		if (!device_match_fwnode(back->dev, fwnode))
+		if (!device_match_fwnode(back->dev, fwnode_back))
 			continue;
 
-		fwnode_handle_put(fwnode);
+		fwnode_handle_put(fwnode_back);
 		ret = __devm_iio_backend_get(dev, back);
 		if (ret)
 			return ERR_PTR(ret);
@@ -315,15 +615,49 @@ struct iio_backend *devm_iio_backend_get(struct device *dev, const char *name)
 		return back;
 	}
 
-	fwnode_handle_put(fwnode);
+	fwnode_handle_put(fwnode_back);
 	return ERR_PTR(-EPROBE_DEFER);
+}
+
+/**
+ * devm_iio_backend_get - Device managed backend device get
+ * @dev: Consumer device for the backend
+ * @name: Backend name
+ *
+ * Get the backend associated with @dev.
+ *
+ * RETURNS:
+ * A backend pointer, negative error pointer otherwise.
+ */
+struct iio_backend *devm_iio_backend_get(struct device *dev, const char *name)
+{
+	return __devm_iio_backend_fwnode_get(dev, name, dev_fwnode(dev));
 }
 EXPORT_SYMBOL_NS_GPL(devm_iio_backend_get, IIO_BACKEND);
 
 /**
+ * devm_iio_backend_fwnode_get - Device managed backend firmware node get
+ * @dev: Consumer device for the backend
+ * @name: Backend name
+ * @fwnode: Firmware node of the backend consumer
+ *
+ * Get the backend associated with a firmware node.
+ *
+ * RETURNS:
+ * A backend pointer, negative error pointer otherwise.
+ */
+struct iio_backend *devm_iio_backend_fwnode_get(struct device *dev,
+						const char *name,
+						struct fwnode_handle *fwnode)
+{
+	return __devm_iio_backend_fwnode_get(dev, name, fwnode);
+}
+EXPORT_SYMBOL_NS_GPL(devm_iio_backend_fwnode_get, IIO_BACKEND);
+
+/**
  * __devm_iio_backend_get_from_fwnode_lookup - Device managed fwnode backend device get
- * @dev:	Consumer device for the backend
- * @fwnode:	Firmware node of the backend device
+ * @dev: Consumer device for the backend
+ * @fwnode: Firmware node of the backend device
  *
  * Search the backend list for a device matching @fwnode.
  * This API should not be used and it's only present for preventing the first
@@ -357,7 +691,7 @@ EXPORT_SYMBOL_NS_GPL(__devm_iio_backend_get_from_fwnode_lookup, IIO_BACKEND);
 
 /**
  * iio_backend_get_priv - Get driver private data
- * @back:	Backend device
+ * @back: Backend device
  */
 void *iio_backend_get_priv(const struct iio_backend *back)
 {
@@ -375,21 +709,21 @@ static void iio_backend_unregister(void *arg)
 
 /**
  * devm_iio_backend_register - Device managed backend device register
- * @dev:	Backend device being registered
- * @ops:	Backend ops
- * @priv:	Device private data
+ * @dev: Backend device being registered
+ * @info: Backend info
+ * @priv: Device private data
  *
- * @ops is mandatory. Not providing it results in -EINVAL.
+ * @info is mandatory. Not providing it results in -EINVAL.
  *
  * RETURNS:
  * 0 on success, negative error number on failure.
  */
 int devm_iio_backend_register(struct device *dev,
-			      const struct iio_backend_ops *ops, void *priv)
+			      const struct iio_backend_info *info, void *priv)
 {
 	struct iio_backend *back;
 
-	if (!ops)
+	if (!info || !info->ops)
 		return dev_err_probe(dev, -EINVAL, "No backend ops given\n");
 
 	/*
@@ -402,7 +736,7 @@ int devm_iio_backend_register(struct device *dev,
 	if (!back)
 		return -ENOMEM;
 
-	back->ops = ops;
+	back->ops = info->ops;
 	back->owner = dev->driver->owner;
 	back->dev = dev;
 	back->priv = priv;

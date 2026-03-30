@@ -464,6 +464,7 @@ static int panel_dpi_probe(struct device *dev,
 	struct panel_desc *desc;
 	unsigned int bus_flags;
 	struct videomode vm;
+	const char *mapping;
 	int ret;
 
 	np = dev->of_node;
@@ -487,6 +488,30 @@ static int panel_dpi_probe(struct device *dev,
 
 	of_property_read_u32(np, "width-mm", &desc->size.width);
 	of_property_read_u32(np, "height-mm", &desc->size.height);
+
+	of_property_read_string(np, "data-mapping", &mapping);
+
+	if (mapping) {
+		if (!strcmp(mapping, "rgb24")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+			desc->bpc = 8;
+		} else if (!strcmp(mapping, "rgb565")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB565_1X16;
+			desc->bpc = 6;
+		} else if (!strcmp(mapping, "bgr666")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB666_1X18;
+			desc->bpc = 6;
+		} else if (!strcmp(mapping, "lvds666")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB666_1X24_CPADHI;
+			desc->bpc = 6;
+		}
+	} else {
+		/* No data-mapping node found, set by default bus format & bpc */
+		dev_warn(dev, "%pOF: no data-mapping node found for \"panel-dpi\" binding\n",
+			np);
+		desc->bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+		desc->bpc = 8;
+	}
 
 	/* Extract bus_flags from display_timing */
 	bus_flags = 0;
@@ -569,11 +594,18 @@ static int panel_simple_probe(struct device *dev, const struct panel_desc *desc)
 	if (IS_ERR(panel->supply))
 		return PTR_ERR(panel->supply);
 
-	panel->enable_gpio = devm_gpiod_get_optional(dev, "enable",
-						     GPIOD_OUT_LOW);
+	panel->enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_ASIS);
 	if (IS_ERR(panel->enable_gpio))
 		return dev_err_probe(dev, PTR_ERR(panel->enable_gpio),
 				     "failed to request GPIO\n");
+
+	if (panel->enable_gpio) {
+		err = gpiod_get_direction(panel->enable_gpio);
+		if (err != 0)
+			gpiod_direction_output(panel->enable_gpio, 0);
+		else
+			gpiod_direction_output(panel->enable_gpio, 1);
+	}
 
 	err = of_drm_get_panel_orientation(dev->of_node, &panel->orientation);
 	if (err) {
@@ -4585,8 +4617,8 @@ static void panel_simple_platform_shutdown(struct platform_device *pdev)
 
 static const struct dev_pm_ops panel_simple_pm_ops = {
 	SET_RUNTIME_PM_OPS(panel_simple_suspend, panel_simple_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	SET_LATE_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				     pm_runtime_force_resume)
 };
 
 static struct platform_driver panel_simple_platform_driver = {
