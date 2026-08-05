@@ -1976,8 +1976,8 @@ static int mcp251fdx_gpio_setup(struct mcp251xfd_priv *priv)
 	gc->direction_input = mcp251xfd_gpio_direction_input;
 	gc->get = mcp251xfd_gpio_get;
 	gc->get_multiple = mcp251xfd_gpio_get_multiple;
-	gc->set = mcp251xfd_gpio_set;
-	gc->set_multiple = mcp251xfd_gpio_set_multiple;
+	gc->set = (void (*)(struct gpio_chip *, unsigned int, int))mcp251xfd_gpio_set;
+	gc->set_multiple = (void (*)(struct gpio_chip *, unsigned long *, unsigned long *))mcp251xfd_gpio_set_multiple;
 	gc->base = -1;
 	gc->can_sleep = true;
 	gc->ngpio = ARRAY_SIZE(mcp251xfd_gpio_names);
