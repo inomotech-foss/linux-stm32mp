@@ -1115,6 +1115,8 @@ patternProperties:
     description: QNAP Systems, Inc.
   "^quanta,.*":
     description: Quanta Computer Inc.
+  "^quectel,.*":
+    description: Quectel Wireless Solutions Co., Ltd.
   "^radxa,.*":
     description: Radxa
   "^raidsonic,.*":
