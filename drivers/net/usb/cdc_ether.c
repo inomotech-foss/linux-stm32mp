@@ -521,12 +521,50 @@ static void usbnet_cdc_zte_status(struct usbnet *dev, struct urb *urb)
 	usbnet_link_change(dev, !!event->wValue, 0);
 }
 
+/* Ignore link state notifications
+ *
+ * Quectel EG915N modules in ECM mode only send a NETWORK_CONNECTION
+ * notification when the host selects the data altsetting, reflecting
+ * whether the netcard is attached to a PDP context at that moment.
+ * They never send one afterwards, so a netcard connected after enumeration
+ * leaves the carrier off forever and the interface unusable.
+ * Work around this by ignoring the notification and keeping the carrier
+ * always on.
+ */
+static void usbnet_cdc_quectel_status(struct usbnet *dev, struct urb *urb)
+{
+	struct usb_cdc_notification *event;
+
+	if (urb->actual_length < sizeof(*event))
+		return;
+
+	event = urb->transfer_buffer;
+
+	if (event->bNotificationType == USB_CDC_NOTIFY_NETWORK_CONNECTION) {
+		netif_dbg(dev, timer, dev->net, "CDC: ignoring carrier %s\n",
+			  event->wValue ? "on" : "off");
+		return;
+	}
+
+	usbnet_cdc_status(dev, urb);
+}
+
 static const struct driver_info	cdc_info = {
 	.description =	"CDC Ethernet Device",
 	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT,
 	.bind =		usbnet_cdc_bind,
 	.unbind =	usbnet_cdc_unbind,
 	.status =	usbnet_cdc_status,
+	.set_rx_mode =	usbnet_cdc_update_filter,
+	.manage_power =	usbnet_manage_power,
+};
+
+static const struct driver_info	quectel_cdc_info = {
+	.description =	"Quectel CDC Ethernet Device",
+	.flags =	FLAG_ETHER | FLAG_POINTTOPOINT,
+	.bind =		usbnet_cdc_bind,
+	.unbind =	usbnet_cdc_unbind,
+	.status =	usbnet_cdc_quectel_status,
 	.set_rx_mode =	usbnet_cdc_update_filter,
 	.manage_power =	usbnet_manage_power,
 };
@@ -561,6 +599,7 @@ static const struct driver_info wwan_info = {
 #define REALTEK_VENDOR_ID	0x0bda
 #define SAMSUNG_VENDOR_ID	0x04e8
 #define LENOVO_VENDOR_ID	0x17ef
+#define QUECTEL_VENDOR_ID	0x2c7c
 #define LINKSYS_VENDOR_ID	0x13b1
 #define NVIDIA_VENDOR_ID	0x0955
 #define HP_VENDOR_ID		0x03f0
@@ -939,6 +978,12 @@ static const struct usb_device_id	products[] = {
 				      USB_CDC_SUBCLASS_ETHERNET,
 				      USB_CDC_PROTO_NONE),
 	.driver_info = (unsigned long)&wwan_info,
+}, {
+	/* Quectel EG915N in ECM mode: bogus link state notifications */
+	USB_DEVICE_AND_INTERFACE_INFO(QUECTEL_VENDOR_ID, 0x6002, USB_CLASS_COMM,
+				      USB_CDC_SUBCLASS_ETHERNET,
+				      USB_CDC_PROTO_NONE),
+	.driver_info = (unsigned long)&quectel_cdc_info,
 }, {
 	USB_INTERFACE_INFO(USB_CLASS_COMM, USB_CDC_SUBCLASS_ETHERNET,
 			USB_CDC_PROTO_NONE),
