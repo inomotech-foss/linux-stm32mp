@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/quectel,pwrseq.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Quectel Modems GPIO Power sequences
+
+maintainers:
+  - Victor Bertin <victor.bertin@b-on.com>
+
+description: |
+  Power sequences for Quectel modems whose PWRKEY and RESET lines work as
+  buttons : the line must be asserted for a given time and then released.
+
+properties:
+  compatible:
+    const: quectel,pwrseq
+
+  power-gpios:
+    maxItems: 1
+    description: GPIO connected to the modem PWRKEY input
+
+  reset-gpios:
+    maxItems: 1
+    description: GPIO connected to the modem RESET input
+
+  sleep-gpios:
+    maxItems: 1
+    description: GPIO used to put the modem to sleep (reserved for future use)
+
+  power-on-pulse-ms:
+    default: 500
+    description: Duration to assert the PWRKEY line to power on the modem
+
+  power-off-pulse-ms:
+    default: 2000
+    description: Duration to assert the PWRKEY line to power off the modem
+
+  reset-pulse-ms:
+    default: 300
+    description: Duration to assert the RESET line to reset the modem
+
+required:
+  - compatible
+  - power-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    eg915-pwrseq {
+        compatible = "quectel,pwrseq";
+        power-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
+        reset-gpios = <&gpioa 2 GPIO_ACTIVE_HIGH>;
+        sleep-gpios = <&gpioa 3 GPIO_ACTIVE_HIGH>;
+    };
