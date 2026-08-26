@@ -475,6 +475,20 @@ config STM32_OMM
 	    - chip select selection override.
 	    - the time between 2 transactions in multiplexed mode.
 
+config PWRSEQ_QUECTEL
+	tristate "Quectel Modems GPIO Power sequences"
+	depends on GPIOLIB && OF
+	help
+	  This driver performs the power sequences used to power, reset and
+	  put to sleep Quectel modems.
+	  The modem PWRKEY and RESET inputs emulate buttons: the GPIO line
+	  must be asserted for a given time and then released. The modem is
+	  powered on when the driver probes and powered off during system
+	  shutdown.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called pwrseq_quectel.
+
 config PCI_ENDPOINT_TEST
 	depends on PCI
 	select CRC32
