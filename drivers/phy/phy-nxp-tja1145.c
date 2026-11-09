@@ -19,6 +19,7 @@
 
 #define TJA1145_IDENT			0x7e
 #define TJA1145_IDENT_TJA1145T		0x70
+#define TJA1145_IDENT_TJA1145T_FD	0x74
 
 #define TJA1145_SPI_READ_BIT		BIT(0)
 #define TJA1145T_MAX_BITRATE		1000000
@@ -121,13 +122,14 @@ static int tja1145_check_ident(struct device *dev, struct regmap *map)
 	if (ret)
 		return ret;
 
-	if (val != TJA1145_IDENT_TJA1145T) {
-		dev_err(dev, "Expected device id: 0x%02x, got: 0x%02x\n",
-			TJA1145_IDENT_TJA1145T, val);
+	switch (val) {
+	case TJA1145_IDENT_TJA1145T:
+	case TJA1145_IDENT_TJA1145T_FD:
+		return 0;
+	default:
+		dev_err(dev, "Unexpected device id: 0x%02x\n", val);
 		return -ENODEV;
 	}
-
-	return 0;
 }
 
 static int tja1145_probe(struct spi_device *spi)
