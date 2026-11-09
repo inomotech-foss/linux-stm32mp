@@ -15,31 +15,33 @@ description: |
 
 properties:
   compatible:
-    const: quectel,pwrseq
+    enum:
+      - quectel,ag35-pwrseq
+      - quectel,eg915k-pwrseq
+      - quectel,eg915n-pwrseq
 
   power-gpios:
     maxItems: 1
-    description: GPIO connected to the modem PWRKEY input
+    description: GPIO connected to the modem PWRKEY input.
 
   reset-gpios:
     maxItems: 1
-    description: GPIO connected to the modem RESET input
-
-  sleep-gpios:
-    maxItems: 1
-    description: GPIO used to put the modem to sleep (reserved for future use)
+    description: GPIO connected to the modem RESET input.
 
   power-on-pulse-ms:
-    default: 500
-    description: Duration to assert the PWRKEY line to power on the modem
+    description: |
+      Duration to assert the PWRKEY line to power on the modem. Overrides the
+      datasheet value of the modem.
 
   power-off-pulse-ms:
-    default: 2000
-    description: Duration to assert the PWRKEY line to power off the modem
+    description: |
+      Duration to assert the PWRKEY line to power off the modem. Overrides the
+      datasheet value of the modem.
 
   reset-pulse-ms:
-    default: 300
-    description: Duration to assert the RESET line to reset the modem
+    description: |
+      Duration to assert the RESET line to reset the modem. Overrides the
+      datasheet value of the modem.
 
 required:
   - compatible
@@ -51,8 +53,8 @@ examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
     eg915-pwrseq {
-        compatible = "quectel,pwrseq";
+        compatible = "quectel,eg915n-pwrseq";
         power-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
         reset-gpios = <&gpioa 2 GPIO_ACTIVE_HIGH>;
-        sleep-gpios = <&gpioa 3 GPIO_ACTIVE_HIGH>;
+        power-on-pulse-ms = <600>;
     };
