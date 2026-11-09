@@ -479,8 +479,8 @@ config PWRSEQ_QUECTEL
 	tristate "Quectel Modems GPIO Power sequences"
 	depends on GPIOLIB && OF
 	help
-	  This driver performs the power sequences used to power, reset and
-	  put to sleep Quectel modems.
+	  This driver performs the power sequences used to power and reset
+	  Quectel modems.
 	  The modem PWRKEY and RESET inputs emulate buttons: the GPIO line
 	  must be asserted for a given time and then released. The modem is
 	  powered on when the driver probes and powered off during system
