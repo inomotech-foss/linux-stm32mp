@@ -485,6 +485,9 @@ config PWRSEQ_QUECTEL
 	  must be asserted for a given time and then released. The modem is
 	  powered on when the driver probes and powered off during system
 	  shutdown.
+	  The driver can also switch the modem USB VBUS supply off during
+	  system suspend, so that the modem can enter sleep mode independently
+	  of the state of the bus.
 
 	  This driver can also be built as a module.  If so, the module
 	  will be called pwrseq_quectel.
