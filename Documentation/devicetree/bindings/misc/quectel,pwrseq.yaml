@@ -28,6 +28,13 @@ properties:
     maxItems: 1
     description: GPIO connected to the modem RESET input.
 
+  vbus-supply:
+    description: |
+      Supply of the modem USB_VBUS input. It is switched off during system
+      suspend, so that the modem sees a USB disconnect and can enter sleep
+      mode independently of the state of the bus (the USB PHY might be powered
+      off when the USB host goes to sleep).
+
   power-on-pulse-ms:
     description: |
       Duration to assert the PWRKEY line to power on the modem. Overrides the
@@ -45,7 +52,6 @@ properties:
 
 required:
   - compatible
-  - power-gpios
 
 additionalProperties: false
 
@@ -57,4 +63,5 @@ examples:
         power-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
         reset-gpios = <&gpioa 2 GPIO_ACTIVE_HIGH>;
         power-on-pulse-ms = <600>;
+        vbus-supply = <&modem_vbus>;
     };
