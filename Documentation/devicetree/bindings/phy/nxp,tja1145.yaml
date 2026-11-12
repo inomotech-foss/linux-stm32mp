@@ -54,6 +54,12 @@ properties:
     description:
       Battery supply voltage
 
+  wakeup-source:
+    description:
+      Put the transceiver in sleep mode during system suspend, instead
+      of standby mode. The INH pin is thus released and rises again
+      when the transceiver detects a wake-up pattern on the bus.
+
 required:
   - compatible
   - reg
