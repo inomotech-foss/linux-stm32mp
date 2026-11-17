@@ -19,6 +19,9 @@
 #define TJA1145_MODE_CTRL_STBY		BIT(2)
 #define TJA1145_MODE_CTRL_NORMAL	TJA1145_MODE_CTRL_MC
 
+#define TJA1145_MAIN_STATUS		0x03
+#define TJA1145_MAIN_STATUS_FSMS	BIT(7)
+
 #define TJA1145_CAN_CTRL		0x20
 #define TJA1145_CAN_CTRL_CMC		GENMASK(1, 0)
 #define TJA1145_CAN_CTRL_ACTIVE		BIT(1)
@@ -231,10 +234,17 @@ static int tja1145_resume(struct device *dev)
 {
 	struct tja1145 *priv = dev_get_drvdata(dev);
 	struct regmap *map = priv->map;
+	unsigned int val;
 	int ret;
 
 	if (!device_may_wakeup(dev))
 		return 0;
+
+	ret = regmap_read(map, TJA1145_MAIN_STATUS, &val);
+	if (ret)
+		dev_err(dev, "failed to read main status: %d\n", ret);
+	else if (val & TJA1145_MAIN_STATUS_FSMS)
+		dev_warn(dev, "VCC or VIO undervoltage forced sleep mode\n");
 
 	if (priv->wake_gpio) {
 		gpiod_set_value_cansleep(priv->wake_gpio, 1);
