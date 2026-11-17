@@ -3,6 +3,8 @@
  * Copyright (C) 2025 Liebherr-Electronics and Drives GmbH
  */
 #include <linux/bitfield.h>
+#include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/property.h>
@@ -25,6 +27,8 @@
 #define TJA1145_TRX_EVENT_EN_CWE	BIT(0)
 
 #define TJA1145_WAKE_EVENT_EN		0x4c
+#define TJA1145_WAKE_EVENT_EN_WPRE	BIT(1)
+#define TJA1145_WAKE_PULSE_US		50
 
 #define TJA1145_SYS_EVENT_STATUS	0x61
 #define TJA1145_TRX_EVENT_STATUS	0x63
@@ -39,6 +43,7 @@
 
 struct tja1145 {
 	struct regmap *map;
+	struct gpio_desc *wake_gpio;
 	unsigned int saved_mode;
 };
 
@@ -189,10 +194,6 @@ static int tja1145_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
-	ret = regmap_write(map, TJA1145_WAKE_EVENT_EN, 0);
-	if (ret)
-		return ret;
-
 	ret = regmap_set_bits(map, TJA1145_TRX_EVENT_EN,
 			      TJA1145_TRX_EVENT_EN_CWE);
 	if (ret)
@@ -235,6 +236,12 @@ static int tja1145_resume(struct device *dev)
 	if (!device_may_wakeup(dev))
 		return 0;
 
+	if (priv->wake_gpio) {
+		gpiod_set_value_cansleep(priv->wake_gpio, 1);
+		fsleep(TJA1145_WAKE_PULSE_US);
+		gpiod_set_value_cansleep(priv->wake_gpio, 0);
+	}
+
 	ret = regmap_write(map, TJA1145_MODE_CTRL, priv->saved_mode);
 	if (ret)
 		return ret;
@@ -270,6 +277,16 @@ static int tja1145_probe(struct spi_device *spi)
 	ret = tja1145_check_ident(dev, map);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to identify device\n");
+
+	priv->wake_gpio = devm_gpiod_get_optional(dev, "wake", GPIOD_OUT_LOW);
+	if (IS_ERR(priv->wake_gpio))
+		return dev_err_probe(dev, PTR_ERR(priv->wake_gpio),
+				     "failed to get wake GPIO\n");
+
+	ret = regmap_write(map, TJA1145_WAKE_EVENT_EN,
+			   priv->wake_gpio ? TJA1145_WAKE_EVENT_EN_WPRE : 0);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to configure WAKE pin\n");
 
 	priv->map = map;
 	spi_set_drvdata(spi, priv);
