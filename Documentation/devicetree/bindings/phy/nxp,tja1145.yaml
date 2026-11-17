@@ -54,6 +54,13 @@ properties:
     description:
       Battery supply voltage
 
+  wake-gpios:
+    maxItems: 1
+    description:
+      GPIO connected to the WAKE input. If present, the transceiver wakes
+      up on a rising edge of the WAKE pin. Otherwise, wake-up via the WAKE
+      pin is disabled.
+
   wakeup-source:
     description:
       Put the transceiver in sleep mode during system suspend, instead
